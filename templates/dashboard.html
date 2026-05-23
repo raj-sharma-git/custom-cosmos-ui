@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - CosmosUI{% endblock %}
+
+{% block content %}
+<div class="dashboard-container">
+
+
+    <!-- Active System Connection Specs -->
+    <div class="grid-layout cols-3 gap-lg">
+        <div class="glass-card status-card">
+            <div class="card-icon gradient-blue">
+                <i class="fa-solid fa-network-wired"></i>
+            </div>
+            <div class="card-info">
+                <h3>Cosmos DB Endpoint</h3>
+                <p class="value font-mono truncate" title="{{ auth_info.endpoint if auth_info else '' }}">
+                    {{ auth_info.endpoint if auth_info else 'Not Found' }}
+                </p>
+                <span class="subtext">Active Live Connection</span>
+            </div>
+        </div>
+
+        <div class="glass-card status-card">
+            <div class="card-icon gradient-purple">
+                <i class="fa-solid fa-shield-halved"></i>
+            </div>
+            <div class="card-info">
+                <h3>Authentication Method</h3>
+                <p class="value">{{ auth_info.method if auth_info else 'Not Found' }}</p>
+                <span class="subtext">Active credentials session</span>
+            </div>
+        </div>
+
+        <div class="glass-card status-card">
+            <div class="card-icon gradient-green">
+                <i class="fa-solid fa-server"></i>
+            </div>
+            <div class="card-info">
+                <h3>Status</h3>
+                <p class="value"><span class="badge badge-success">Online</span></p>
+                <span class="subtext">Cosmos Client connection is healthy</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Resource Management Actions -->
+    <div class="grid-layout cols-2 gap-lg margin-top-lg">
+        <!-- Card 1: Single Provisioning -->
+        <div class="glass-card">
+            <div class="section-header" style="margin-bottom: 16px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <i class="fa-solid fa-circle-plus" style="color: var(--accent-blue); font-size: 20px;"></i>
+                    <h3 style="margin: 0; font-size: 17px; font-weight: 600;">Create DB & Container</h3>
+                </div>
+            </div>
+            <form id="singleCreateForm" onsubmit="handleSingleCreate(event)">
+                <div class="input-wrapper" style="margin-bottom: 14px;">
+                    <label style="font-size: 12px; font-weight: 500; margin-bottom: 6px; display: block;">Database</label>
+                    {% if db_tree %}
+                        <div style="display: flex; gap: 16px; margin-bottom: 8px;">
+                            <label style="font-size: 12px; display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text-normal);">
+                                <input type="radio" name="db_source" value="existing" checked onclick="toggleDbSource('existing')" style="accent-color: var(--primary);"> Select Existing
+                            </label>
+                            <label style="font-size: 12px; display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text-normal);">
+                                <input type="radio" name="db_source" value="new" onclick="toggleDbSource('new')" style="accent-color: var(--primary);"> Create New
+                            </label>
+                        </div>
+                        <div id="db_select_wrapper">
+                            <select id="create_db_select" class="db-select">
+                                {% for db in db_tree %}
+                                    <option value="{{ db.id }}">{{ db.id }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div id="db_input_wrapper" style="display: none;">
+                            <div class="input-icon-group">
+                                <i class="fa-solid fa-database icon-inside"></i>
+                                <input type="text" id="create_db_id" placeholder="e.g. products-db">
+                            </div>
+                        </div>
+                    {% else %}
+                        <input type="hidden" name="db_source" value="new">
+                        <div class="input-icon-group">
+                            <i class="fa-solid fa-database icon-inside"></i>
+                            <input type="text" id="create_db_id" required placeholder="e.g. products-db">
+                        </div>
+                    {% endif %}
+                </div>
+
+                <div class="input-row">
+                    <div class="input-wrapper">
+                        <label for="create_container_id">Container ID <span style="color: var(--text-muted); font-weight: 400; font-size: 11px;">(Optional)</span></label>
+                        <div class="input-icon-group">
+                            <i class="fa-solid fa-table-list icon-inside"></i>
+                            <input type="text" id="create_container_id" placeholder="e.g. inventory">
+                        </div>
+                    </div>
+
+                    <div class="input-wrapper">
+                        <label for="create_partition_key">Partition Key Path <span style="color: var(--text-muted); font-weight: 400; font-size: 11px;">(Optional)</span></label>
+                        <div class="input-icon-group">
+                            <i class="fa-solid fa-key icon-inside"></i>
+                            <input type="text" id="create_partition_key" placeholder="/id" value="/id">
+                        </div>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn btn-primary btn-block" style="padding: 11px;">
+                    <i class="fa-solid fa-circle-nodes"></i>
+                    <span>Provision Resources</span>
+                </button>
+            </form>
+        </div>
+
+        <!-- Card 2: Bulk Provisioning -->
+        <div class="glass-card" style="display: flex; flex-direction: column;">
+            <div class="section-header" style="margin-bottom: 12px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <i class="fa-solid fa-file-excel" style="color: var(--success); font-size: 20px;"></i>
+                    <h3 style="margin: 0; font-size: 17px; font-weight: 600;">Bulk Provision (Excel/CSV)</h3>
+                </div>
+            </div>
+            <p style="font-size: 12.5px; color: var(--text-muted); margin-bottom: 14px; line-height: 1.5;">
+                Upload a CSV or Excel (.xlsx) file to provision multiple resources. Required headers: <code>db_name</code>, <code>container_name</code>, and <code>partition_key</code>.
+            </p>
+            <form id="bulkCreateForm" action="{{ url_for('ui.bulk_create_dbs_containers') }}" method="POST" enctype="multipart/form-data" style="display: flex; flex-direction: column; gap: 14px; flex-grow: 1; justify-content: space-between;">
+                <div class="upload-zone">
+                    <i class="fa-solid fa-cloud-arrow-up" style="font-size: 28px; color: var(--text-muted); margin-bottom: 8px; display: block; margin-left: auto; margin-right: auto; pointer-events: none;"></i>
+                    <div id="bulkCreateFileName" style="font-size: 12.5px; color: var(--text-normal); font-weight: 500; pointer-events: none;">Choose CSV or Excel file</div>
+                    <input type="file" name="file" id="bulkCreateFile" accept=".csv,.xlsx" onchange="updateBulkFileNameDisplay(this)" required>
+                </div>
+                <button type="submit" class="btn btn-neutral btn-block" style="padding: 11px; border-color: var(--border-color);">
+                    <i class="fa-solid fa-upload"></i>
+                    <span>Upload & Bulk Create</span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Databases Overview -->
+    <div class="section-container margin-top-lg">
+        <div class="section-header">
+            <h3>Connected Databases</h3>
+            <span class="badge badge-neutral">{{ db_tree|length }} Databases</span>
+        </div>
+
+        {% if db_tree %}
+            <div class="grid-layout cols-2 gap-md">
+                {% for db in db_tree %}
+                <div class="glass-card database-card">
+                    <div class="db-card-header">
+                        <div class="db-title-group" style="display: flex; align-items: center; gap: 8px;">
+                            <i class="fa-solid fa-database db-card-icon"></i>
+                            <h4>{{ db.id }}</h4>
+                            <button type="button" class="btn-action btn-delete" onclick="confirmDeleteDb('{{ db.id }}')" title="Delete Database" style="background: transparent; border: none; color: var(--danger); cursor: pointer; transition: var(--transition-fast); display: inline-flex; align-items: center; padding: 2px 4px;" onmouseover="this.style.color='var(--danger-hover)'" onmouseout="this.style.color='var(--danger)'">
+                                <i class="fa-solid fa-trash-can" style="font-size: 13px;"></i>
+                            </button>
+                        </div>
+                        <span class="badge badge-blue">{{ db.containers|length }} Containers</span>
+                    </div>
+
+                    <div class="db-card-body">
+                        <h5>Containers:</h5>
+                        {% if db.containers %}
+                            <div class="containers-grid">
+                                {% for container in db.containers %}
+                                <a href="{{ url_for('ui.container_view', db_id=db.id, container_id=container) }}" class="container-badge-link">
+                                    <i class="fa-solid fa-table-list"></i>
+                                    <span>{{ container }}</span>
+                                </a>
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <p class="empty-text">No containers found in this database.</p>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="empty-state">
+                <i class="fa-solid fa-database-slash empty-icon"></i>
+                <h4>No databases found in this account</h4>
+                <p>Ensure that your Cosmos DB account contains at least one database and container.</p>
+            </div>
+        {% endif %}
+    </div>
+
+
+</div>
+<div class="modal" id="bulkConfirmModal">
+    <div class="modal-content" style="max-width: 500px;">
+        <div class="modal-header">
+            <h3>Database Exists</h3>
+            <span class="close-modal" onclick="closeBulkConfirmModal()">&times;</span>
+        </div>
+        <div class="modal-body">
+            <p>The following databases from your uploaded file already exist:</p>
+            <ul id="bulkExistingDbsList" style="margin-top: 10px; margin-bottom: 20px; font-weight: bold; max-height: 150px; overflow-y: auto;"></ul>
+            <p style="margin-bottom: 15px;">How would you like to proceed?</p>
+            <div style="background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; font-size: 13px; margin-bottom: 20px;">
+                <strong>Merge:</strong> Creates containers in the existing database without affecting current data.<br>
+                <strong style="color: var(--danger);">Overwrite:</strong> Deletes the existing database (and all its containers/data) and creates it from scratch.
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button type="button" class="btn btn-neutral" onclick="closeBulkConfirmModal()">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="submitBulkCreate('merge')" style="background-color: var(--primary);">Merge</button>
+                <button type="button" class="btn btn-danger" onclick="submitBulkCreate('overwrite')" style="background-color: var(--danger);">Overwrite</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,352 @@
+{% extends "base.html" %}
+
+{% block title %}{{ container_id }} - CosmosUI{% endblock %}
+
+{% block content %}
+<div class="container-workspace">
+    <!-- Header Summary Details -->
+    <div class="container-meta-bar glass-card">
+        <div class="meta-title-group">
+            <div class="meta-icon">
+                <i class="fa-solid fa-table-list"></i>
+            </div>
+            <div>
+                <h2>{{ container_id }}</h2>
+                <span class="subtext">Database: <strong>{{ db_id }}</strong></span>
+            </div>
+        </div>
+        
+        <div class="meta-stats">
+            <div class="meta-stat">
+                <span class="label">Partition Key Path</span>
+                <span class="value font-mono">{{ pk_path }}</span>
+            </div>
+            <div class="meta-stat">
+                <span class="label">Total Matched</span>
+                <span class="value font-mono">{{ total_items }}</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Search Panel and Portability Panel -->
+    <div class="control-panel gap-md">
+        <!-- Search Controls -->
+        <div class="glass-card search-card flex-grow">
+            <form action="{{ url_for('ui.container_view', db_id=db_id, container_id=container_id) }}" method="GET" class="search-form" id="searchForm">
+                <input type="hidden" name="limit" value="{{ limit }}">
+                <input type="hidden" name="page" value="1"> <!-- Reset to page 1 on new search -->
+                
+                <div class="search-type-selectors">
+                    <label class="search-type-radio">
+                        <input type="radio" name="search_mode" value="simple" {% if search_mode == 'simple' %}checked{% endif %} onclick="toggleSearchMode('simple')">
+                        <div class="type-button">Simple Search</div>
+                    </label>
+                    <label class="search-type-radio">
+                        <input type="radio" name="search_mode" value="advanced" {% if search_mode == 'advanced' %}checked{% endif %} onclick="toggleSearchMode('advanced')">
+                        <div class="type-button">Advanced SQL WHERE</div>
+                    </label>
+                </div>
+
+                <div class="search-input-group">
+                    <div class="search-input-wrapper">
+                        <i class="fa-solid fa-magnifying-glass search-icon-left"></i>
+                        <input type="text" name="search_query" id="search_query" value="{{ search_query }}" 
+                               placeholder="{% if search_mode == 'advanced' %}c.category = 'Electronics' AND c.price > 49.99{% else %}Search by document ID...{% endif %}">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-search">
+                        <i class="fa-solid fa-filter"></i>
+                        <span>Apply</span>
+                    </button>
+                    {% if search_query %}
+                    <a href="{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, limit=limit) }}" class="btn btn-neutral btn-clear" title="Clear Search">
+                        <i class="fa-solid fa-times"></i>
+                    </a>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
+
+        <!-- Portability controls -->
+        <div class="glass-card portability-card">
+            <div class="portability-title">
+                <i class="fa-solid fa-right-left"></i>
+                <span>Data Portability</span>
+            </div>
+            
+            <div class="portability-actions">
+                <!-- Export Trigger -->
+                <div class="export-group">
+                    <button class="btn btn-neutral dropdown-trigger" onclick="toggleDropdown('exportDropdown')">
+                        <i class="fa-solid fa-file-arrow-down"></i>
+                        <span>Export Data</span>
+                        <i class="fa-solid fa-caret-down"></i>
+                    </button>
+                    <div class="dropdown-menu" id="exportDropdown">
+                        <a href="{{ url_for('ui.export_items', db_id=db_id, container_id=container_id, format='csv', search_mode=search_mode, search_query=search_query) }}">
+                            <i class="fa-solid fa-file-csv"></i> Export to CSV
+                        </a>
+                        <a href="{{ url_for('ui.export_items', db_id=db_id, container_id=container_id, format='xlsx', search_mode=search_mode, search_query=search_query) }}">
+                            <i class="fa-solid fa-file-excel"></i> Export to Excel
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Import Trigger -->
+                <button class="btn btn-neutral" onclick="openImportModal()">
+                    <i class="fa-solid fa-file-arrow-up"></i>
+                    <span>Import Bulk</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toolbar: Create Document & Delete Container -->
+    <div class="table-toolbar margin-top-md" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+        <button class="btn btn-primary btn-create" onclick="openCreateModal()">
+            <i class="fa-solid fa-plus"></i>
+            <span>Create Document</span>
+        </button>
+        <button class="btn btn-danger" onclick="confirmDeleteContainer('{{ db_id }}', '{{ container_id }}')">
+            <i class="fa-solid fa-trash-can"></i>
+            <span>Delete Container</span>
+        </button>
+    </div>
+
+    <!-- Main Documents Table -->
+    <div class="glass-card table-card margin-top-xs">
+        <div class="table-wrapper">
+            <table class="documents-table">
+                <thead>
+                    <tr>
+                        <th width="30%">Document ID</th>
+                        <th width="30%">Partition Key Value ({{ pk_path }})</th>
+                        <th width="25%">Content Summary</th>
+                        <th width="15%" class="text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% if items %}
+                        {% for item in items %}
+                        <tr>
+                            <td class="font-semibold text-white">
+                                <a href="javascript:void(0)" onclick="openEditModal({{ item.raw|tojson|forceescape }})" class="id-link">
+                                    <i class="fa-regular fa-file-code file-icon"></i>
+                                    <span>{{ item.id }}</span>
+                                </a>
+                            </td>
+                            <td>
+                                <span class="badge badge-neutral font-mono truncate-width max-w-200" title="{{ item.pk_val }}">
+                                    {{ item.pk_val if item.pk_val is not none else 'null' }}
+                                </span>
+                            </td>
+                            <td>
+                                <span class="summary-text truncate-width max-w-250" title="{{ item.raw|tojson }}">
+                                    <!-- Render summary fields -->
+                                    {% set summary = [] %}
+                                    {% for k, v in item.raw.items() %}
+                                        {% if k not in ['id', '_rid', '_self', '_etag', '_attachments', '_ts'] and v is not none and v is not stringable %}
+                                            {% if v is string or v is number or v is boolean %}
+                                                {% if summary.append(k ~ ': ' ~ v) %}{% endif %}
+                                            {% endif %}
+                                        {% endif %}
+                                    {% endfor %}
+                                    {{ summary|join(', ') if summary else '{}' }}
+                                </span>
+                            </td>
+                            <td class="text-right">
+                                <div class="action-buttons-group">
+                                    <button class="btn-action btn-edit" title="Edit JSON" onclick="openEditModal({{ item.raw|tojson|forceescape }})">
+                                        <i class="fa-solid fa-pen-to-square"></i>
+                                    </button>
+                                    <button class="btn-action btn-delete" title="Delete Document" onclick="confirmDelete('{{ item.id }}', {{ item.pk_val|tojson|forceescape if item.pk_val is not none else 'null' }})">
+                                        <i class="fa-regular fa-trash-can"></i>
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                        <tr>
+                            <td colspan="4" class="table-empty-state">
+                                <i class="fa-solid fa-folder-open empty-icon"></i>
+                                <h4>No Documents Found</h4>
+                                <p>Create a new document, upload data, or adjust your search parameters to view results.</p>
+                            </td>
+                        </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Pagination Bar -->
+        {% if total_pages > 1 or items %}
+        <div class="pagination-bar">
+            <div class="page-size-selector">
+                <span>Show:</span>
+                <select id="pageSizeSelect" onchange="changePageSize(this.value)">
+                    <option value="5" {% if limit == 5 %}selected{% endif %}>5 rows</option>
+                    <option value="10" {% if limit == 10 %}selected{% endif %}>10 rows</option>
+                    <option value="25" {% if limit == 25 %}selected{% endif %}>25 rows</option>
+                    <option value="50" {% if limit == 50 %}selected{% endif %}>50 rows</option>
+                </select>
+            </div>
+
+            <div class="pagination-info">
+                Page <strong>{{ page }}</strong> of <strong>{{ total_pages }}</strong> (Total matching: {{ total_items }})
+            </div>
+
+            <div class="pagination-controls">
+                <a href="{% if page > 1 %}{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, page=page-1, limit=limit, search_mode=search_mode, search_query=search_query) }}{% else %}javascript:void(0){% endif %}" 
+                   class="btn-page {% if page <= 1 %}disabled{% endif %}" title="Previous Page">
+                    <i class="fa-solid fa-angle-left"></i>
+                </a>
+                
+                <div class="page-links">
+                    {% for p in range(1, total_pages + 1) %}
+                        {% if p == 1 or p == total_pages or (p >= page - 2 and p <= page + 2) %}
+                            <a href="{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, page=p, limit=limit, search_mode=search_mode, search_query=search_query) }}" 
+                               class="page-link-btn {% if page == p %}active{% endif %}">
+                                {{ p }}
+                            </a>
+                        {% elif p == 2 or p == total_pages - 1 %}
+                            <span class="pagination-ellipsis">...</span>
+                        {% endif %}
+                    {% endfor %}
+                </div>
+
+                <a href="{% if page < total_pages %}{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, page=page+1, limit=limit, search_mode=search_mode, search_query=search_query) }}{% else %}javascript:void(0){% endif %}" 
+                   class="btn-page {% if page >= total_pages %}disabled{% endif %}" title="Next Page">
+                    <i class="fa-solid fa-angle-right"></i>
+                </a>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- ================= MODALS & DRAWERS ================= -->
+
+<!-- 1. Document Editor Modal (Create/Edit JSON) -->
+<div class="modal" id="documentModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <i class="fa-regular fa-file-code title-icon"></i>
+                    <h3 id="modalTitle">Edit Document</h3>
+                </div>
+                <button class="modal-close" onclick="closeModal('documentModal')">&times;</button>
+            </div>
+            
+            <div class="modal-body">
+                <div class="editor-header">
+                    <div class="editor-actions">
+                        <button class="btn btn-neutral btn-sm" onclick="formatEditorJson()">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i> Format JSON
+                        </button>
+                    </div>
+                    <span class="badge badge-neutral" id="partitionKeyBadge">Partition Key: {{ pk_path }}</span>
+                </div>
+                
+                <div class="editor-container">
+                    <textarea id="jsonEditor" spellcheck="false" placeholder="Enter JSON content here..."></textarea>
+                </div>
+                <div class="editor-error-banner" id="jsonErrorBanner">
+                    <i class="fa-solid fa-circle-exclamation"></i>
+                    <span id="jsonErrorMessage">Invalid JSON structure</span>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button class="btn btn-neutral" onclick="closeModal('documentModal')">Cancel</button>
+                <button class="btn btn-primary" id="btnSaveDocument" onclick="saveDocument()">
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                    <span>Save Document</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 2. Import Data Modal -->
+<div class="modal" id="importModal">
+    <div class="modal-dialog">
+        <form action="{{ url_for('ui.import_items', db_id=db_id, container_id=container_id) }}" method="POST" enctype="multipart/form-data" class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <i class="fa-solid fa-file-arrow-up title-icon"></i>
+                    <h3>Bulk Import Documents</h3>
+                </div>
+                <button type="button" class="modal-close" onclick="closeModal('importModal')">&times;</button>
+            </div>
+            
+            <div class="modal-body">
+                <p class="description-text">Upload a CSV or Excel (.xlsx) file to import documents directly into <strong>{{ container_id }}</strong> container.</p>
+                
+                <div class="file-upload-area">
+                    <i class="fa-solid fa-cloud-arrow-up upload-icon"></i>
+                    <label for="importFile" class="file-label">Choose CSV or Excel file</label>
+                    <input type="file" name="file" id="importFile" accept=".csv, .xlsx" required onchange="updateFileNameDisplay(this)">
+                    <div class="file-name-display" id="importFileName">No file chosen</div>
+                </div>
+
+                <div class="glass-card import-tip margin-top-md">
+                    <h5><i class="fa-solid fa-circle-info"></i> Import formatting tips:</h5>
+                    <ul>
+                        <li><strong>headers:</strong> The first row must be column headers that match document attributes.</li>
+                        <li><strong>id field:</strong> If an <code>id</code> column isn't provided, unique UUIDs will be generated.</li>
+                        <li><strong>partition key:</strong> Ensure a column exists that matches the partition key path: <code>{{ pk_path.strip('/') }}</code>. Empty keys will import as "imported".</li>
+                        <li><strong>nested objects:</strong> Standard values, nested JSON dicts (e.g. <code>{"age": 30}</code>), and arrays are supported.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn btn-neutral" onclick="closeModal('importModal')">Cancel</button>
+                <button type="submit" class="btn btn-primary">
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                    <span>Start Import</span>
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 3. Confirm Delete Dialog -->
+<div class="modal" id="deleteModal">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title-group text-danger">
+                    <i class="fa-regular fa-trash-can title-icon"></i>
+                    <h3>Delete Document?</h3>
+                </div>
+                <button class="modal-close" onclick="closeModal('deleteModal')">&times;</button>
+            </div>
+            
+            <div class="modal-body text-center pad-tb-lg">
+                <p>Are you sure you want to permanently delete document <strong id="deleteItemIdDisplay" class="text-white"></strong>?</p>
+                <p class="subtext margin-top-xs text-warning"><i class="fa-solid fa-triangle-exclamation"></i> This operation is irreversible.</p>
+            </div>
+
+            <div class="modal-footer">
+                <button class="btn btn-neutral" onclick="closeModal('deleteModal')">Cancel</button>
+                <button class="btn btn-danger" id="btnConfirmDelete" onclick="executeDelete()">
+                    <i class="fa-regular fa-trash-can"></i>
+                    <span>Delete</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Embed state for javascript -->
+<script>
+    const CONFIG = {
+        dbId: "{{ db_id }}",
+        containerId: "{{ container_id }}",
+        pkPath: "{{ pk_path }}",
+        cleanPk: "{{ pk_path.strip('/') }}"
+    };
+</script>
+{% endblock %}
