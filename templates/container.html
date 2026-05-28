@@ -144,7 +144,7 @@
                                     <!-- Render summary fields -->
                                     {% set summary = [] %}
                                     {% for k, v in item.raw.items() %}
-                                        {% if k not in ['id', '_rid', '_self', '_etag', '_attachments', '_ts'] and v is not none and v is not stringable %}
+                                        {% if k not in ['id', '_rid', '_self', '_etag', '_attachments', '_ts'] and v is not none %}
                                             {% if v is string or v is number or v is boolean %}
                                                 {% if summary.append(k ~ ': ' ~ v) %}{% endif %}
                                             {% endif %}

@@ -42,8 +42,8 @@ COPY . .
 RUN adduser -D appuser && chown -R appuser /app
 USER appuser
 
-# Expose the port the app runs on (based on cosmos-ui.py)
-EXPOSE 5001
+# Expose the port the app runs on
+EXPOSE 8000
 
-# Run the application
-CMD ["python", "cosmos-ui.py"]
+# Run the application using Uvicorn
+CMD ["uvicorn", "asgi:app", "--host", "0.0.0.0", "--port", "8000"]

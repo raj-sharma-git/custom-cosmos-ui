@@ -4,3 +4,5 @@ azure-cosmos
 azure-identity
 openpyxl
 cryptography
+uvicorn
+a2wsgi

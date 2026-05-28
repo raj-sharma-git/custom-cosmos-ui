@@ -12,8 +12,10 @@ from flask_session import Session
 from azure.identity import ClientSecretCredential
 from azure.cosmos import CosmosClient, PartitionKey, exceptions as cosmos_exceptions
 from openpyxl import Workbook, load_workbook
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-app = Flask(__name__)
+app = Flask(__name__, static_url_path="/cosmos-ui/static")
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Server-side Session Configuration
 # We place session files inside the workspace to keep the project self-contained and clean.
@@ -135,7 +137,7 @@ def login():
             elif auth_method == "key":
                 if not endpoint or not account_key:
                     raise ValueError("Endpoint URI and Account Key are required.")
-                client = CosmosClient(endpoint, credential=account_key)
+                client = CosmosClient(endpoint, credential=account_key, connection_verify=True)
                 auth_info["endpoint"] = endpoint
                 auth_info["method"] = "Account Key"
                 
@@ -143,7 +145,7 @@ def login():
                 if not endpoint or not tenant_id or not client_id or not client_secret:
                     raise ValueError("All Service Principal fields are required.")
                 credential = ClientSecretCredential(tenant_id, client_id, client_secret)
-                client = CosmosClient(endpoint, credential=credential)
+                client = CosmosClient(endpoint, credential=credential, connection_verify=True)
                 auth_info["endpoint"] = endpoint
                 auth_info["method"] = "Service Principal"
             else:

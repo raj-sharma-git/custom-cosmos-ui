@@ -16,7 +16,11 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body class="{% if not session.get('sid') %}auth-layout{% else %}dashboard-layout{% endif %}">
-    
+    <script>
+        if (localStorage.getItem("theme") === "light") {
+            document.body.classList.add("light-theme");
+        }
+    </script>
     {% if session.get('sid') %}
     <!-- Sidebar Navigation -->
     <aside class="app-sidebar">
