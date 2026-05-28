@@ -1,5 +1,8 @@
 # Cosmos DB UI Manager
 
+<img width="2880" height="1614" alt="image" src="https://github.com/user-attachments/assets/aa203759-f199-4ee5-8dee-54b9f41acbe2" />
+
+
 A lightweight, modern web interface for managing Azure Cosmos DB resources. This tool provides an easy-to-use dashboard to create, view, and delete databases and containers, as well as a bulk provisioning feature via CSV/Excel uploads.
 
 ## Use Cases
@@ -29,10 +32,10 @@ docker build -t cosmos-ui:latest .
 
 ### 2. Run the Container locally
 ```bash
-docker run -p 5001:5001 cosmos-ui:latest
+docker run -p 8000:8000 cosmos-ui:latest
 ```
 
-The application will be accessible at `http://localhost:5001`.
+The application will be accessible at `http://localhost:8000`.
 
 ### 3. Deploying to AKS (Azure Kubernetes Service)
 When deploying to AKS within your private VNet:
