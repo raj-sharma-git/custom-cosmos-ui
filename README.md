@@ -1,4 +1,4 @@
-# Cosmos DB UI Manager
+# Azure Cosmos DB UI Manager
 
 <img width="2880" height="1614" alt="image" src="https://github.com/user-attachments/assets/aa203759-f199-4ee5-8dee-54b9f41acbe2" />
 
