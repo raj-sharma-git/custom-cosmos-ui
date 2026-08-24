@@ -42,7 +42,65 @@
                 </svg>
                 <span class="logo-text">Cosmos<span>UI</span></span>
             </div>
-            <div class="badge badge-premium">v2.0</div>
+            <div class="version-badge-container">
+                <div class="badge badge-premium version-badge" tabindex="0">
+                    <span>v2.1</span>
+                    <i class="fa-solid fa-sparkles" style="margin-left: 3px; font-size: 8.5px; opacity: 0.85;"></i>
+                </div>
+                <div class="version-popover glass-card">
+                    <div class="version-popover-header">
+                        <div class="version-title-wrap">
+                            <span class="version-title">Cosmos UI v2.1</span>
+                            <span class="version-date">Changelog</span>
+                        </div>
+                        <span class="badge badge-blue">Latest</span>
+                    </div>
+                    <ul class="version-changelog-list">
+                        <li>
+                            <i class="fa-solid fa-check-double text-success"></i>
+                            <div class="changelog-content">
+                                <strong>Multi-Select Bulk Deletion:</strong> Select multiple documents via checkboxes with automatic 429 retry backoff.
+                            </div>
+                        </li>
+                        <li>
+                            <i class="fa-solid fa-terminal text-info"></i>
+                            <div class="changelog-content">
+                                <strong>Full Cosmos SQL Console:</strong> Run any query with <code>GROUP BY</code>, <code>TOP</code>, custom projections & aggregations.
+                            </div>
+                        </li>
+                        <li>
+                            <i class="fa-solid fa-gauge-high text-warning"></i>
+                            <div class="changelog-content">
+                                <strong>20L+ Scalable Pagination:</strong> Smart count caching eliminates 2M-record count overhead on page turns.
+                            </div>
+                        </li>
+                        <li>
+                            <i class="fa-solid fa-bolt text-success"></i>
+                            <div class="changelog-content">
+                                <strong>High-Throughput Streaming Ingestion:</strong> Continuous worker queue for 400k+ records with live progress & speed tracking.
+                            </div>
+                        </li>
+                        <li>
+                            <i class="fa-solid fa-file-arrow-down text-primary"></i>
+                            <div class="changelog-content">
+                                <strong>20L+ Streaming Export:</strong> Non-blocking export for JSON, JSONL/NDJSON, CSV & Excel with live progress & 429 retries.
+                            </div>
+                        </li>
+                        <li>
+                            <i class="fa-solid fa-broom text-danger"></i>
+                            <div class="changelog-content">
+                                <strong>Empty Container Purge:</strong> One-click instant container wipe preserving partition key & schema.
+                            </div>
+                        </li>
+                        <li>
+                            <i class="fa-solid fa-ban text-info"></i>
+                            <div class="changelog-content">
+                                <strong>Instant Job Cancellation:</strong> Fast non-blocking sub-200ms background thread stopping.
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+            </div>
         </div>
 
         <nav class="sidebar-menu">

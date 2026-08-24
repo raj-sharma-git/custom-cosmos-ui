@@ -154,7 +154,8 @@ body.dashboard-layout {
     height: 100vh;
     position: sticky;
     top: 0;
-    overflow-y: auto;
+    overflow: visible;
+    z-index: 100;
 }
 
 .sidebar-header {
@@ -163,6 +164,8 @@ body.dashboard-layout {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    position: relative;
+    z-index: 200;
 }
 
 .logo {
@@ -192,6 +195,7 @@ body.dashboard-layout {
 .sidebar-menu {
     flex-grow: 1;
     padding: 20px 12px;
+    overflow-y: auto;
 }
 
 .menu-label {
@@ -563,6 +567,161 @@ body.dashboard-layout {
     color: var(--text-white);
     border: 1px solid rgba(255, 255, 255, 0.15);
     box-shadow: 0 0 10px var(--accent-purple-glow);
+}
+
+/* ==========================================================================
+   Version Badge & Hover Changelog Popover
+   ========================================================================== */
+.version-badge-container {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.version-badge {
+    cursor: pointer;
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+    outline: none;
+    user-select: none;
+}
+
+.version-badge:hover,
+.version-badge:focus {
+    transform: translateY(-1px) scale(1.05);
+    box-shadow: 0 0 14px var(--accent-purple-glow);
+}
+
+.version-popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    right: auto;
+    width: 320px;
+    padding: 14px;
+    background: rgba(15, 23, 42, 0.98);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 12px;
+    box-shadow: 0 20px 45px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(6px);
+    transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s;
+    z-index: 99999;
+    text-align: left;
+}
+
+.sidebar-header .version-popover {
+    left: 0;
+    right: auto;
+    top: calc(100% + 10px);
+    z-index: 99999;
+}
+
+.auth-logo .version-popover {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%) translateY(6px);
+}
+
+.version-badge-container:hover .version-popover,
+.version-badge-container:focus-within .version-popover {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.auth-logo .version-badge-container:hover .version-popover,
+.auth-logo .version-badge-container:focus-within .version-popover {
+    transform: translateX(-50%) translateY(0);
+}
+
+body.light-theme .version-popover {
+    background: rgba(255, 255, 255, 0.96);
+    border-color: rgba(0, 0, 0, 0.12);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.04);
+}
+
+.version-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.version-title-wrap {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+
+.version-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-white);
+}
+
+body.light-theme .version-title {
+    color: var(--text-primary);
+}
+
+.version-date {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.version-changelog-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+}
+
+.version-changelog-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-normal);
+}
+
+.version-changelog-list li i {
+    font-size: 11px;
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+
+.version-changelog-list .changelog-content {
+    flex-grow: 1;
+}
+
+.version-changelog-list strong {
+    color: var(--text-white);
+    font-weight: 600;
+}
+
+body.light-theme .version-changelog-list strong {
+    color: var(--text-primary);
+}
+
+.version-changelog-list code {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 4px;
+    border-radius: 4px;
+}
+
+body.light-theme .version-changelog-list code {
+    background: rgba(0, 0, 0, 0.06);
 }
 
 .badge-neutral {
@@ -2201,3 +2360,234 @@ body.light-theme .upload-zone:hover {
     opacity: 1 !important;
     transform: scale(1.1);
 }
+
+/* =========================================================================
+   Cosmos SQL Query Console & Hints Bar
+   ========================================================================= */
+.sql-query-textarea {
+    width: 100%;
+    min-height: 52px;
+    padding: 10px 14px 10px 42px;
+    background: transparent;
+    border: none;
+    color: var(--text-white);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.45;
+    resize: vertical;
+    outline: none;
+}
+
+body.light-theme .sql-query-textarea {
+    color: var(--text-primary);
+}
+
+.search-actions-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sql-hints-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border-color);
+    flex-wrap: wrap;
+}
+
+.hint-label {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.btn-hint {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-normal);
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.btn-hint:hover {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+}
+
+body.light-theme .btn-hint {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+body.light-theme .btn-hint:hover {
+    background: var(--primary);
+    color: #fff;
+}
+
+/* Query Error Alert Card */
+.query-error-card {
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-radius: 8px;
+    padding: 10px 14px;
+    animation: fadeIn 0.2s ease-in-out;
+}
+
+body.light-theme .query-error-card {
+    background: rgba(239, 68, 68, 0.06);
+    border-color: rgba(239, 68, 68, 0.28);
+}
+
+.query-error-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #f87171;
+    margin-bottom: 6px;
+}
+
+.query-error-msg {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-white);
+    background: rgba(0, 0, 0, 0.25);
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    word-break: break-word;
+}
+
+body.light-theme .query-error-msg {
+    background: rgba(0, 0, 0, 0.04);
+    color: #991b1b;
+}
+
+/* =========================================================================
+   Table Checkbox Multi-Selection & Bulk Toolbar
+   ========================================================================= */
+.table-checkbox {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--primary);
+    vertical-align: middle;
+}
+
+.bulk-actions-toolbar {
+    animation: fadeIn 0.2s ease-in-out;
+    padding: 4px 10px;
+    background: rgba(0, 120, 212, 0.12);
+    border: 1px solid rgba(0, 120, 212, 0.35);
+    border-radius: 8px;
+}
+
+body.light-theme .bulk-actions-toolbar {
+    background: rgba(0, 120, 212, 0.08);
+}
+
+tr.selected-row {
+    background: rgba(0, 120, 212, 0.15) !important;
+}
+
+body.light-theme tr.selected-row {
+    background: rgba(0, 120, 212, 0.1) !important;
+}
+
+/* =========================================================================
+   Live Import Progress Modal & Metrics Grid
+   ========================================================================= */
+.progress-wrapper {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 14px;
+}
+
+body.light-theme .progress-wrapper {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+.progress-info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.progress-bar-track {
+    width: 100%;
+    height: 12px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+}
+
+body.light-theme .progress-bar-track {
+    background: rgba(0, 0, 0, 0.08);
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #0078d4, #00b4d8);
+    border-radius: 6px;
+    transition: width 0.35s ease;
+    box-shadow: 0 0 10px rgba(0, 180, 216, 0.5);
+}
+
+.import-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+}
+
+.metric-card {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+body.light-theme .metric-card {
+    background: rgba(0, 0, 0, 0.02);
+}
+
+.metric-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.metric-value {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-white);
+}
+
+body.light-theme .metric-value {
+    color: var(--text-primary);
+}
+
+.text-success { color: #10b981 !important; }
+.text-info { color: #38bdf8 !important; }
+.text-warning { color: #f59e0b !important; }
+.text-danger { color: #ef4444 !important; }
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+

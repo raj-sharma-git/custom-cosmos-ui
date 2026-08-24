@@ -3,8 +3,13 @@ import io
 import csv
 import json
 import uuid
+import time
+import queue
+import random
+import threading
 import traceback
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import (
     Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, Blueprint
 )
@@ -18,9 +23,14 @@ app = Flask(__name__, static_url_path="/cosmos-ui/static")
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Server-side Session Configuration
-# We place session files inside the workspace to keep the project self-contained and clean.
 SESSION_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flask_sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
+
+TEMP_UPLOAD_DIR = os.path.join(SESSION_DIR, "temp_imports")
+os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
+
+TEMP_EXPORT_DIR = os.path.join(SESSION_DIR, "temp_exports")
+os.makedirs(TEMP_EXPORT_DIR, exist_ok=True)
 
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", str(uuid.uuid4()))
 app.config.update(
@@ -33,6 +43,14 @@ Session(app)
 
 # In-memory store for active CosmosClient instances
 CLIENT_STORE = {}
+
+# Background Ingestion Tasks Store
+IMPORT_TASKS = {}
+IMPORT_TASKS_LOCK = threading.Lock()
+
+# Background Export Tasks Store
+EXPORT_TASKS = {}
+EXPORT_TASKS_LOCK = threading.Lock()
 
 # ---------- Blueprint ----------
 ui = Blueprint("ui", __name__, url_prefix="/cosmos-ui")
@@ -52,6 +70,34 @@ def login_required(f):
     return inner
 
 # ---------- Helper Functions ----------
+def execute_with_429_retry(func, *args, max_retries=10, initial_delay=0.1, **kwargs):
+    """
+    Executes a Cosmos DB SDK operation with automatic HTTP 429 exponential backoff retry.
+    Returns: (result, retries_count)
+    """
+    delay = initial_delay
+    retries = 0
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs), retries
+        except cosmos_exceptions.CosmosHttpResponseError as e:
+            if e.status_code == 429: # RequestRateTooLarge
+                retries += 1
+                retry_after_ms = e.headers.get("x-ms-retry-after-ms") if hasattr(e, "headers") and e.headers else None
+                if retry_after_ms:
+                    try:
+                        sleep_time = (float(retry_after_ms) / 1000.0) + random.uniform(0.01, 0.05)
+                    except Exception:
+                        sleep_time = delay + random.uniform(0.01, 0.05)
+                else:
+                    sleep_time = delay + random.uniform(0.01, 0.05)
+                    delay = min(delay * 2, 5.0)
+                time.sleep(sleep_time)
+            else:
+                raise e
+    # Final attempt
+    return func(*args, **kwargs), retries
+
 def get_partition_key_path(container):
     """Programmatically fetch the partition key path for a container."""
     try:
@@ -61,6 +107,42 @@ def get_partition_key_path(container):
     except Exception as e:
         print(f"Error fetching partition key path: {e}")
         return "/id" # fallback
+
+def extract_cosmos_error_message(err):
+    """Extract a readable, clean message from Azure Cosmos DB SDK exceptions."""
+    err_str = str(err)
+    try:
+        import re
+        json_matches = re.findall(r'(\{[^{}]*"errors"[^{}]*\})', err_str, re.DOTALL)
+        if not json_matches:
+            json_matches = re.findall(r'(\{.*"errors".*\})', err_str, re.DOTALL)
+        for jm in json_matches:
+            try:
+                data = json.loads(jm)
+                errors = data.get("errors", [])
+                if errors and isinstance(errors, list):
+                    first = errors[0]
+                    code = first.get("code", "")
+                    msg = first.get("message", "")
+                    if code and msg:
+                        return f"[{code}] {msg}"
+                    elif msg:
+                        return msg
+            except Exception:
+                continue
+
+        msg_match = re.search(r'"message":\s*"([^"]+)"', err_str)
+        if msg_match:
+            code_match = re.search(r'"code":\s*"([^"]+)"', err_str)
+            if code_match:
+                return f"[{code_match.group(1)}] {msg_match.group(1)}"
+            return msg_match.group(1)
+    except Exception:
+        pass
+
+    if "Content:" in err_str:
+        err_str = err_str.split("Content:")[0].strip()
+    return err_str.strip()
 
 def extract_partition_key_value(item, pk_path):
     """Dynamically extract the partition key value from an item's attributes based on the path."""
@@ -75,28 +157,112 @@ def extract_partition_key_value(item, pk_path):
             return None
     return val
 
-def build_search_query(search_mode, search_query):
+def parse_and_build_query(search_mode, search_query, offset=0, limit=10):
     """
-    Build Cosmos DB SQL query parts based on the search inputs.
-    Returns: (where_clause, parameters_list)
+    Processes user search input into valid Cosmos DB SQL.
+    Supports:
+    1. Simple ID search (CONTAINS)
+    2. Shorthand WHERE clauses (e.g. c.status = 'active')
+    3. Full Cosmos SQL queries (e.g. SELECT c.id, c.name FROM c WHERE ... ORDER BY ...)
+    4. Complex queries (GROUP BY, VALUE COUNT(1), TOP ...)
     """
     if not search_query or not search_query.strip():
-        return "", []
+        return {
+            "items_sql": f"SELECT * FROM c ORDER BY c.id OFFSET {offset} LIMIT {limit}",
+            "count_sql": "SELECT VALUE COUNT(1) FROM c",
+            "params": [],
+            "is_custom_projection": False,
+            "is_direct_query": False,
+            "can_paginate": True
+        }
 
-    search_query = search_query.strip()
+    query = search_query.strip()
 
-    if search_mode == "advanced":
-        # User provides a raw WHERE clause like "c.age > 21" or "c.category = 'Electronics'"
-        # We strip initial 'WHERE' if they added it to be user friendly
-        if search_query.upper().startswith("WHERE"):
-            search_query = search_query[5:].strip()
-        return f"WHERE {search_query}", []
-    else:
-        # Simple Search matches in ID or performs CONTAINS on string fields
-        # Note: Cosmos DB supports CONTAINS(c.id, @search)
+    if search_mode == "simple":
         where = "WHERE CONTAINS(LOWER(c.id), @search)"
-        params = [{"name": "@search", "value": search_query.lower()}]
-        return where, params
+        params = [{"name": "@search", "value": query.lower()}]
+        return {
+            "items_sql": f"SELECT * FROM c {where} ORDER BY c.id OFFSET {offset} LIMIT {limit}",
+            "count_sql": f"SELECT VALUE COUNT(1) FROM c {where}",
+            "params": params,
+            "is_custom_projection": False,
+            "is_direct_query": False,
+            "can_paginate": True
+        }
+
+    # Advanced Mode
+    upper_q = query.upper()
+
+    # Check if it's a full SELECT query
+    if upper_q.startswith("SELECT"):
+        has_group_by = "GROUP BY" in upper_q
+        has_value = "SELECT VALUE" in upper_q
+        has_top = "SELECT TOP" in upper_q
+        has_offset_limit = "OFFSET" in upper_q and "LIMIT" in upper_q
+
+        if has_group_by or has_value or has_top or has_offset_limit:
+            return {
+                "items_sql": query,
+                "count_sql": None,
+                "params": [],
+                "is_custom_projection": not upper_q.startswith("SELECT * FROM C"),
+                "is_direct_query": True,
+                "can_paginate": False
+            }
+
+        # For general SELECT ... FROM c [WHERE ...] [ORDER BY ...]
+        count_sql = None
+        from_idx = upper_q.find("FROM")
+        if from_idx != -1:
+            order_idx = upper_q.rfind("ORDER BY")
+            if order_idx != -1 and order_idx > from_idx:
+                from_where_part = query[from_idx:order_idx].strip()
+            else:
+                from_where_part = query[from_idx:].strip()
+            count_sql = f"SELECT VALUE COUNT(1) {from_where_part}"
+
+        if "ORDER BY" in upper_q:
+            items_sql = f"{query} OFFSET {offset} LIMIT {limit}"
+        else:
+            items_sql = f"{query} ORDER BY c.id OFFSET {offset} LIMIT {limit}"
+
+        return {
+            "items_sql": items_sql,
+            "count_sql": count_sql,
+            "params": [],
+            "is_custom_projection": not (upper_q.startswith("SELECT * FROM C") or upper_q.startswith("SELECT * FROM C ")),
+            "is_direct_query": False,
+            "can_paginate": True
+        }
+    else:
+        # Shorthand WHERE clause
+        if upper_q.startswith("WHERE"):
+            clean_where = query[5:].strip()
+        else:
+            clean_where = query.strip()
+
+        return {
+            "items_sql": f"SELECT * FROM c WHERE {clean_where} ORDER BY c.id OFFSET {offset} LIMIT {limit}",
+            "count_sql": f"SELECT VALUE COUNT(1) FROM c WHERE {clean_where}",
+            "params": [],
+            "is_custom_projection": False,
+            "is_direct_query": False,
+            "can_paginate": True
+        }
+
+# Legacy helper for export compatibility
+def build_search_query(search_mode, search_query):
+    meta = parse_and_build_query(search_mode, search_query)
+    if search_mode == "advanced":
+        if search_query.strip().upper().startswith("SELECT"):
+            return "", []
+        clean = search_query.strip()
+        if clean.upper().startswith("WHERE"):
+            clean = clean[5:].strip()
+        return f"WHERE {clean}" if clean else "", []
+    elif search_mode == "simple" and search_query.strip():
+        return "WHERE CONTAINS(LOWER(c.id), @search)", [{"name": "@search", "value": search_query.strip().lower()}]
+    return "", []
 
 # ---------- Root Redirect ----------
 @app.route("/")
@@ -205,6 +371,469 @@ def dashboard():
         flash(f"Error fetching databases: {str(e)}", "danger")
         return render_template("dashboard.html", db_tree=[], auth_info=session.get("auth_info"))
 
+# ---------- Streaming File Helper for Large Ingestions ----------
+def stream_file_records(file_path, filename):
+    """
+    Generator yielding records from JSON, JSONL, NDJSON, CSV, or XLSX files without high memory usage.
+    Yields: (row_index, document_dict)
+    """
+    fn = filename.lower()
+    
+    if fn.endswith(".jsonl") or fn.endswith(".ndjson"):
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            for idx, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    doc = json.loads(line)
+                    if isinstance(doc, dict):
+                        yield idx + 1, doc
+                    else:
+                        yield idx + 1, {"_raw_value": doc}
+                except Exception as e:
+                    yield idx + 1, {"_parse_error": str(e)}
+
+    elif fn.endswith(".json"):
+        # Check if JSON array or JSON Lines format
+        first_char = ""
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            for char in f.read(1024):
+                if not char.isspace():
+                    first_char = char
+                    break
+        
+        if first_char == "[":
+            # Standard JSON Array
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    for idx, doc in enumerate(data):
+                        if isinstance(doc, dict):
+                            yield idx + 1, doc
+                        else:
+                            yield idx + 1, {"_raw_value": doc}
+                elif isinstance(data, dict):
+                    yield 1, data
+        else:
+            # NDJSON / JSONL
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                for idx, line in enumerate(f):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        doc = json.loads(line)
+                        if isinstance(doc, dict):
+                            yield idx + 1, doc
+                        else:
+                            yield idx + 1, {"_raw_value": doc}
+                    except Exception as e:
+                        yield idx + 1, {"_parse_error": str(e)}
+
+    elif fn.endswith(".csv"):
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            reader = csv.reader(f)
+            headers = next(reader, None)
+            if headers:
+                clean_headers = [str(h).strip() if h is not None else f"col_{i}" for i, h in enumerate(headers)]
+                for idx, row in enumerate(reader):
+                    doc = {}
+                    for h_idx, h in enumerate(clean_headers):
+                        if h_idx < len(row) and row[h_idx] is not None:
+                            val = row[h_idx]
+                            if isinstance(val, str) and (val.startswith("{") or val.startswith("[")):
+                                try:
+                                    val = json.loads(val)
+                                except Exception:
+                                    pass
+                            doc[h] = val
+                    yield idx + 2, doc
+
+    elif fn.endswith(".xlsx"):
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        ws = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+        headers = next(rows_iter, None)
+        if headers:
+            clean_headers = [str(h).strip() if h is not None else f"col_{i}" for i, h in enumerate(headers)]
+            for idx, row in enumerate(rows_iter):
+                if not row or all(v is None for v in row):
+                    continue
+                doc = {}
+                for h_idx, h in enumerate(clean_headers):
+                    if h_idx < len(row) and row[h_idx] is not None:
+                        val = row[h_idx]
+                        if isinstance(val, str) and (val.startswith("{") or val.startswith("[")):
+                            try:
+                                val = json.loads(val)
+                            except Exception:
+                                pass
+                        doc[h] = val
+                yield idx + 2, doc
+        wb.close()
+
+
+def run_bulk_import_worker(task_id, file_path, filename, db_id, container_id, pk_path, concurrency, client):
+    """
+    Ultra-high-throughput continuous streaming worker pool for maximum Cosmos DB ingestion speed.
+    Eliminates pipeline stalls by using a continuous thread-safe producer-consumer queue.
+    """
+    clean_pk = pk_path.strip("/") if pk_path else "id"
+    
+    with IMPORT_TASKS_LOCK:
+        task = IMPORT_TASKS.get(task_id)
+        if not task:
+            return
+        task["status"] = "in_progress"
+        task["start_time"] = time.time()
+
+    try:
+        db_client = client.get_database_client(db_id)
+        container = db_client.get_container_client(container_id)
+
+        # Scale concurrency up to 200 workers
+        num_workers = max(10, min(concurrency, 200))
+        doc_queue = queue.Queue(maxsize=num_workers * 25)
+        
+        stats_lock = threading.Lock()
+        total_processed = 0
+        total_success = 0
+        total_failed = 0
+        total_429_retries = 0
+        errors = []
+        stop_event = threading.Event()
+
+        def worker_loop():
+            nonlocal total_processed, total_success, total_failed, total_429_retries
+            while not stop_event.is_set():
+                try:
+                    item = doc_queue.get(timeout=0.15)
+                except queue.Empty:
+                    continue
+
+                if item is None:
+                    doc_queue.task_done()
+                    break
+
+                row_idx, doc = item
+                if "_parse_error" in doc:
+                    with stats_lock:
+                        total_processed += 1
+                        total_failed += 1
+                        if len(errors) < 25:
+                            errors.append(f"Row {row_idx}: Parse error: {doc['_parse_error']}")
+                    doc_queue.task_done()
+                    continue
+
+                if "id" not in doc or not str(doc["id"]).strip():
+                    doc["id"] = str(uuid.uuid4())
+                else:
+                    doc["id"] = str(doc["id"])
+
+                pk_val = extract_partition_key_value(doc, pk_path)
+                if pk_val is None:
+                    doc[clean_pk] = "imported"
+
+                try:
+                    _, retries = execute_with_429_retry(container.upsert_item, body=doc, max_retries=10)
+                    with stats_lock:
+                        total_processed += 1
+                        total_success += 1
+                        total_429_retries += retries
+                except Exception as err:
+                    with stats_lock:
+                        total_processed += 1
+                        total_failed += 1
+                        if len(errors) < 25:
+                            errors.append(f"Row {row_idx}: {str(err)}")
+
+                doc_queue.task_done()
+
+        # Start consumer worker threads
+        workers = []
+        for _ in range(num_workers):
+            t = threading.Thread(target=worker_loop, daemon=True)
+            t.start()
+            workers.append(t)
+
+        # Background metric updater for smooth UI reporting
+        def metric_updater():
+            while not stop_event.is_set():
+                time.sleep(0.2)
+                with stats_lock:
+                    proc = total_processed
+                    succ = total_success
+                    fail = total_failed
+                    r429 = total_429_retries
+                    errs = list(errors)
+                elapsed = max(0.1, time.time() - task["start_time"])
+                speed = round(proc / elapsed, 1)
+                with IMPORT_TASKS_LOCK:
+                    task["processed"] = proc
+                    task["successful"] = succ
+                    task["failed"] = fail
+                    task["retries_429"] = r429
+                    task["speed_per_sec"] = speed
+                    task["errors"] = errs
+
+        metric_thread = threading.Thread(target=metric_updater, daemon=True)
+        metric_thread.start()
+
+        # Producer: Stream records from file directly into queue
+        records_gen = stream_file_records(file_path, filename)
+        for row_info in records_gen:
+            with IMPORT_TASKS_LOCK:
+                if task.get("cancel_requested"):
+                    stop_event.set()
+                    break
+            while not stop_event.is_set():
+                try:
+                    doc_queue.put(row_info, timeout=0.1)
+                    break
+                except queue.Full:
+                    with IMPORT_TASKS_LOCK:
+                        if task.get("cancel_requested"):
+                            stop_event.set()
+                            break
+
+        # If cancelled, drain the remaining queue immediately
+        if stop_event.is_set():
+            while not doc_queue.empty():
+                try:
+                    doc_queue.get_nowait()
+                    doc_queue.task_done()
+                except Exception:
+                    break
+
+        # Send termination sentinels
+        for _ in range(num_workers):
+            try:
+                doc_queue.put_nowait(None)
+            except Exception:
+                pass
+
+        # Await workers with small timeout
+        for t in workers:
+            t.join(timeout=0.2)
+
+        stop_event.set()
+        metric_thread.join(timeout=0.3)
+
+        elapsed = max(0.1, time.time() - task["start_time"])
+        speed = round(total_processed / elapsed, 1)
+
+        with IMPORT_TASKS_LOCK:
+            if task.get("cancel_requested"):
+                task["status"] = "cancelled"
+            elif task.get("status") != "cancelled":
+                task["status"] = "completed"
+            task["end_time"] = time.time()
+            task["processed"] = total_processed
+            task["successful"] = total_success
+            task["failed"] = total_failed
+            task["retries_429"] = total_429_retries
+            task["speed_per_sec"] = speed
+            task["errors"] = errors
+
+    except Exception as e:
+        traceback.print_exc()
+        with IMPORT_TASKS_LOCK:
+            task["status"] = "failed"
+            task["error_message"] = str(e)
+            task["end_time"] = time.time()
+            
+    finally:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
+
+
+def run_export_worker(task_id, file_path, filename, format_type, db_id, container_id, query_sql, query_params, client):
+    """
+    Background worker that streams documents from Cosmos DB directly into disk
+    supporting JSON, JSONL, CSV, and XLSX with 429 rate limit backoff and live progress.
+    """
+    with EXPORT_TASKS_LOCK:
+        task = EXPORT_TASKS.get(task_id)
+        if not task:
+            return
+        task["status"] = "in_progress"
+        task["start_time"] = time.time()
+
+    try:
+        db_client = client.get_database_client(db_id)
+        container = db_client.get_container_client(container_id)
+
+        processed = 0
+        total_429_retries = 0
+
+        # Query Cosmos DB with cross-partition support and 1,000-item page streaming
+        query_iterable = container.query_items(
+            query=query_sql,
+            parameters=query_params,
+            enable_cross_partition_query=True,
+            max_item_count=1000
+        )
+        pager = query_iterable.by_page()
+
+        def stream_items_with_retry():
+            nonlocal total_429_retries
+            while True:
+                with EXPORT_TASKS_LOCK:
+                    if task.get("cancel_requested"):
+                        return
+
+                def fetch_page():
+                    try:
+                        return next(pager, None)
+                    except StopIteration:
+                        return None
+
+                page, retries = execute_with_429_retry(fetch_page, max_retries=10)
+                total_429_retries += retries
+                if page is None:
+                    break
+                for item in page:
+                    yield item
+
+        # Stream directly into target file format without high RAM consumption
+        if format_type in ["jsonl", "ndjson"]:
+            with open(file_path, "w", encoding="utf-8") as f:
+                for doc in stream_items_with_retry():
+                    with EXPORT_TASKS_LOCK:
+                        if task.get("cancel_requested"):
+                            break
+                    f.write(json.dumps(doc) + "\n")
+                    processed += 1
+                    if processed % 200 == 0:
+                        elapsed = max(0.1, time.time() - task["start_time"])
+                        with EXPORT_TASKS_LOCK:
+                            task["processed"] = processed
+                            task["speed_per_sec"] = round(processed / elapsed, 1)
+                            task["retries_429"] = total_429_retries
+
+        elif format_type == "json":
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("[\n")
+                first = True
+                for doc in stream_items_with_retry():
+                    with EXPORT_TASKS_LOCK:
+                        if task.get("cancel_requested"):
+                            break
+                    if not first:
+                        f.write(",\n")
+                    else:
+                        first = False
+                    f.write(json.dumps(doc, indent=2))
+                    processed += 1
+                    if processed % 200 == 0:
+                        elapsed = max(0.1, time.time() - task["start_time"])
+                        with EXPORT_TASKS_LOCK:
+                            task["processed"] = processed
+                            task["speed_per_sec"] = round(processed / elapsed, 1)
+                            task["retries_429"] = total_429_retries
+                f.write("\n]\n")
+
+        elif format_type == "csv":
+            with open(file_path, "w", encoding="utf-8", newline="") as f:
+                writer = None
+                headers = []
+                for doc in stream_items_with_retry():
+                    with EXPORT_TASKS_LOCK:
+                        if task.get("cancel_requested"):
+                            break
+                    if writer is None:
+                        if isinstance(doc, dict):
+                            headers = sorted(list(doc.keys()))
+                            if "id" in headers:
+                                headers.remove("id")
+                                headers.insert(0, "id")
+                        else:
+                            headers = ["value"]
+                        writer = csv.writer(f)
+                        writer.writerow(headers)
+
+                    if isinstance(doc, dict):
+                        row = []
+                        for h in headers:
+                            val = doc.get(h, "")
+                            if isinstance(val, (dict, list)):
+                                val = json.dumps(val)
+                            row.append(val)
+                        writer.writerow(row)
+                    else:
+                        writer.writerow([doc])
+
+                    processed += 1
+                    if processed % 200 == 0:
+                        elapsed = max(0.1, time.time() - task["start_time"])
+                        with EXPORT_TASKS_LOCK:
+                            task["processed"] = processed
+                            task["speed_per_sec"] = round(processed / elapsed, 1)
+                            task["retries_429"] = total_429_retries
+
+        elif format_type == "xlsx":
+            wb = Workbook(write_only=True)
+            ws = wb.create_sheet(title="CosmosExport")
+            headers_written = False
+            headers = []
+            for doc in stream_items_with_retry():
+                with EXPORT_TASKS_LOCK:
+                    if task.get("cancel_requested"):
+                        break
+                if not headers_written:
+                    if isinstance(doc, dict):
+                        headers = sorted(list(doc.keys()))
+                        if "id" in headers:
+                            headers.remove("id")
+                            headers.insert(0, "id")
+                    else:
+                        headers = ["value"]
+                    ws.append(headers)
+                    headers_written = True
+
+                if isinstance(doc, dict):
+                    row = []
+                    for h in headers:
+                        val = doc.get(h, "")
+                        if isinstance(val, (dict, list)):
+                            val = json.dumps(val)
+                        row.append(val)
+                    ws.append(row)
+                else:
+                    ws.append([doc])
+
+                processed += 1
+                if processed % 200 == 0:
+                    elapsed = max(0.1, time.time() - task["start_time"])
+                    with EXPORT_TASKS_LOCK:
+                        task["processed"] = processed
+                        task["speed_per_sec"] = round(processed / elapsed, 1)
+                        task["retries_429"] = total_429_retries
+            wb.save(file_path)
+
+        elapsed = max(0.1, time.time() - task["start_time"])
+        with EXPORT_TASKS_LOCK:
+            if task.get("cancel_requested"):
+                task["status"] = "cancelled"
+            else:
+                task["status"] = "completed"
+            task["end_time"] = time.time()
+            task["processed"] = processed
+            task["speed_per_sec"] = round(processed / elapsed, 1)
+            task["retries_429"] = total_429_retries
+
+    except Exception as e:
+        traceback.print_exc()
+        with EXPORT_TASKS_LOCK:
+            task["status"] = "failed"
+            task["error_message"] = str(e)
+            task["end_time"] = time.time()
+
+
 @ui.route("/db/<db_id>/container/<container_id>")
 @login_required
 def container_view(db_id, container_id):
@@ -216,6 +845,7 @@ def container_view(db_id, container_id):
     limit = request.args.get("limit", 10, type=int)
     search_mode = request.args.get("search_mode", "simple")
     search_query = request.args.get("search_query", "")
+    cached_total_str = request.args.get("total_items", None)
 
     offset = (page - 1) * limit
 
@@ -227,32 +857,91 @@ def container_view(db_id, container_id):
         # Programmatically detect Partition Key
         pk_path = get_partition_key_path(container)
         
-        # Build query parts
-        where_clause, params = build_search_query(search_mode, search_query)
+        # Build query parts using upgraded parser
+        q_meta = parse_and_build_query(search_mode, search_query, offset=offset, limit=limit)
         
-        # Get count query
-        count_sql = f"SELECT VALUE COUNT(1) FROM c {where_clause}"
-        count_iter = container.query_items(query=count_sql, parameters=params, enable_cross_partition_query=True)
-        total_items = list(count_iter)[0] if count_iter else 0
+        # Determine total_items (Smart Count for 20L+ records)
+        total_items = None
+        if q_meta["is_direct_query"]:
+            total_items = None # Direct custom queries might return arbitrary rows
+        elif cached_total_str is not None and str(cached_total_str).strip() != "":
+            try:
+                total_items = int(cached_total_str)
+            except ValueError:
+                total_items = None
+                
+        if total_items is None and q_meta["count_sql"]:
+            try:
+                count_iter = container.query_items(
+                    query=q_meta["count_sql"],
+                    parameters=q_meta["params"],
+                    enable_cross_partition_query=True
+                )
+                count_res = list(count_iter)
+                total_items = int(count_res[0]) if count_res and count_res[0] is not None else 0
+            except Exception as count_err:
+                print(f"Count query notice (e.g. large dataset scan): {count_err}")
+                total_items = 0
+
+        query_error = None
+        raw_items = []
+
+        # Execute items query with graceful error handling
+        try:
+            items_iter = container.query_items(
+                query=q_meta["items_sql"],
+                parameters=q_meta["params"],
+                enable_cross_partition_query=True,
+                max_item_count=limit
+            )
+            raw_items = list(items_iter)
+        except Exception as q_err:
+            traceback.print_exc()
+            query_error = extract_cosmos_error_message(q_err)
+            raw_items = []
         
-        # Get items query
-        # Standard query incorporates offset limit
-        items_sql = f"SELECT * FROM c {where_clause} ORDER BY c.id OFFSET {offset} LIMIT {limit}"
-        items_iter = container.query_items(query=items_sql, parameters=params, enable_cross_partition_query=True)
-        items = list(items_iter)
-        
-        # Process items to extract partition key value and quick summaries
+        if query_error:
+            total_items = 0
+        elif total_items is None or total_items == 0:
+            if q_meta["is_direct_query"]:
+                total_items = len(raw_items)
+            elif not q_meta["count_sql"]:
+                total_items = len(raw_items)
+
+        # Process items to extract partition key value, summary, or custom projections
         processed_items = []
-        for it in items:
-            pk_val = extract_partition_key_value(it, pk_path)
-            processed_items.append({
-                "id": it.get("id"),
-                "pk_val": pk_val,
-                "raw": it
-            })
+        custom_columns = []
+        all_keys = set()
+
+        for it in raw_items:
+            if isinstance(it, dict):
+                has_id = "id" in it
+                pk_val = extract_partition_key_value(it, pk_path) if has_id else None
+                all_keys.update(it.keys())
+                processed_items.append({
+                    "id": it.get("id", None),
+                    "pk_val": pk_val,
+                    "has_id": has_id,
+                    "raw": it
+                })
+            else:
+                processed_items.append({
+                    "id": None,
+                    "pk_val": None,
+                    "has_id": False,
+                    "raw": {"_result": it}
+                })
+
+        # If custom projection without standard id, determine custom columns to display
+        is_custom_projection = q_meta["is_custom_projection"] or (len(processed_items) > 0 and not any(p["has_id"] for p in processed_items))
+        if is_custom_projection and all_keys:
+            custom_columns = sorted([k for k in all_keys if not k.startswith("_")])[:8]
+            if not custom_columns:
+                custom_columns = sorted(list(all_keys))[:8]
 
         # Calculate pages
-        total_pages = max(1, (total_items + limit - 1) // limit)
+        effective_total = total_items if total_items is not None else len(processed_items)
+        total_pages = max(1, (effective_total + limit - 1) // limit)
 
         # Database tree for sidebar quick-nav
         databases = list(client.list_databases())
@@ -274,14 +963,18 @@ def container_view(db_id, container_id):
             limit=limit,
             search_mode=search_mode,
             search_query=search_query,
-            total_items=total_items,
+            total_items=effective_total,
             total_pages=total_pages,
+            is_custom_projection=is_custom_projection,
+            custom_columns=custom_columns,
+            can_paginate=q_meta["can_paginate"],
+            query_error=query_error,
             db_tree=db_tree,
             auth_info=session.get("auth_info")
         )
     except Exception as e:
         traceback.print_exc()
-        flash(f"Error querying container: {str(e)}", "danger")
+        flash(f"Error accessing container: {extract_cosmos_error_message(e)}", "danger")
         return redirect(url_for("ui.dashboard"))
 
 # ---------- API Endpoints ----------
@@ -314,8 +1007,8 @@ def api_upsert_item(db_id, container_id):
                 "message": f"Document must contain the partition key path attribute: '{clean_pk}'"
             }), 400
             
-        # Execute Upsert
-        res = container.upsert_item(body=data)
+        # Execute Upsert with 429 retry
+        res, _ = execute_with_429_retry(container.upsert_item, body=data)
         return jsonify({"status": "success", "message": "Document saved successfully", "item": res})
 
     except Exception as e:
@@ -340,117 +1033,409 @@ def api_delete_item(db_id, container_id):
         db_client = client.get_database_client(db_id)
         container = db_client.get_container_client(container_id)
         
-        # Delete item
-        container.delete_item(item=item_id, partition_key=partition_key)
+        # Delete item with 429 retry
+        execute_with_429_retry(container.delete_item, item=item_id, partition_key=partition_key)
         return jsonify({"status": "success", "message": "Document deleted successfully."})
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@ui.route("/db/<db_id>/container/<container_id>/export")
+@ui.route("/api/db/<db_id>/container/<container_id>/items/bulk-delete", methods=["POST"])
 @login_required
-def export_items(db_id, container_id):
-    """Export container documents matching search filter to Excel or CSV"""
+def api_bulk_delete_items(db_id, container_id):
+    """Bulk delete a list of items from Cosmos DB with 429 rate limit backoff"""
+    store = get_store()
+    client = store["client"]
+    try:
+        data = request.get_json()
+        if not data or "items" not in data:
+            return jsonify({"status": "error", "message": "No items provided for deletion."}), 400
+            
+        items_to_delete = data.get("items", [])
+        if not items_to_delete:
+            return jsonify({"status": "error", "message": "Item list is empty."}), 400
+
+        db_client = client.get_database_client(db_id)
+        container = db_client.get_container_client(container_id)
+        
+        deleted_count = 0
+        failed_count = 0
+        total_retries = 0
+        errors = []
+        
+        def delete_single_item(item_info):
+            item_id = item_info.get("id")
+            pk_val = item_info.get("partition_key")
+            if not item_id:
+                return False, 0, "Missing item ID"
+            try:
+                _, retries = execute_with_429_retry(container.delete_item, item=item_id, partition_key=pk_val)
+                return True, retries, None
+            except Exception as e:
+                return False, 0, f"ID {item_id}: {str(e)}"
+                
+        max_workers = min(25, max(1, len(items_to_delete)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_item = {executor.submit(delete_single_item, item): item for item in items_to_delete}
+            for future in as_completed(future_to_item):
+                success, retries, err_msg = future.result()
+                total_retries += retries
+                if success:
+                    deleted_count += 1
+                else:
+                    failed_count += 1
+                    if len(errors) < 5 and err_msg:
+                        errors.append(err_msg)
+                        
+        msg = f"Successfully deleted {deleted_count} document(s)."
+        if total_retries > 0:
+            msg += f" (Handled {total_retries} rate limit retries)"
+        if failed_count > 0:
+            msg += f" {failed_count} item(s) failed."
+            
+        return jsonify({
+            "status": "success" if deleted_count > 0 else "error",
+            "message": msg,
+            "deleted_count": deleted_count,
+            "failed_count": failed_count,
+            "retries_429": total_retries,
+            "errors": errors
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@ui.route("/api/db/<db_id>/container/<container_id>/import-async", methods=["POST"])
+@login_required
+def api_async_import_items(db_id, container_id):
+    """Initiates an asynchronous background bulk ingestion task with live progress tracking"""
     store = get_store()
     client = store["client"]
     
-    format_type = request.args.get("format", "csv").lower()
-    search_mode = request.args.get("search_mode", "simple")
-    search_query = request.args.get("search_query", "")
+    file = request.files.get("file")
+    if not file or file.filename == "":
+        return jsonify({"status": "error", "message": "No file selected for import."}), 400
+        
+    filename = file.filename
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in ["json", "jsonl", "ndjson", "csv", "xlsx"]:
+        return jsonify({"status": "error", "message": "Unsupported format. Please upload JSON, JSONL, NDJSON, CSV, or XLSX."}), 400
 
+    try:
+        concurrency = request.form.get("concurrency", 100, type=int)
+        concurrency = max(10, min(concurrency, 200))
+        
+        db_client = client.get_database_client(db_id)
+        container = db_client.get_container_client(container_id)
+        pk_path = get_partition_key_path(container)
+        
+        task_id = str(uuid.uuid4())
+        temp_file_path = os.path.join(TEMP_UPLOAD_DIR, f"{task_id}_{filename}")
+        file.save(temp_file_path)
+        
+        # Estimate total records for quick progress estimation
+        total_estimate = 0
+        try:
+            if ext in ["jsonl", "ndjson", "csv"]:
+                with open(temp_file_path, "r", encoding="utf-8", errors="replace") as f:
+                    for _ in f:
+                        total_estimate += 1
+                if ext == "csv" and total_estimate > 0:
+                    total_estimate -= 1
+        except Exception:
+            total_estimate = 0
+
+        with IMPORT_TASKS_LOCK:
+            IMPORT_TASKS[task_id] = {
+                "task_id": task_id,
+                "db_id": db_id,
+                "container_id": container_id,
+                "filename": filename,
+                "status": "starting",
+                "total_estimate": total_estimate,
+                "processed": 0,
+                "successful": 0,
+                "failed": 0,
+                "retries_429": 0,
+                "speed_per_sec": 0,
+                "start_time": time.time(),
+                "end_time": None,
+                "errors": [],
+                "cancel_requested": False
+            }
+            
+        # Spawn daemon worker thread
+        worker_thread = threading.Thread(
+            target=run_bulk_import_worker,
+            args=(task_id, temp_file_path, filename, db_id, container_id, pk_path, concurrency, client),
+            daemon=True
+        )
+        worker_thread.start()
+        
+        return jsonify({
+            "status": "success",
+            "task_id": task_id,
+            "message": "Bulk import job initiated successfully.",
+            "total_estimate": total_estimate
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": f"Failed to start import task: {str(e)}"}), 500
+
+@ui.route("/api/import-task/<task_id>", methods=["GET"])
+@login_required
+def api_get_import_task(task_id):
+    """Fetch live progress metrics of a background bulk import task"""
+    with IMPORT_TASKS_LOCK:
+        task = IMPORT_TASKS.get(task_id)
+        if not task:
+            return jsonify({"status": "error", "message": "Task not found"}), 404
+            
+        elapsed = (task["end_time"] if task.get("end_time") else time.time()) - task["start_time"]
+        
+        return jsonify({
+            "status": "success",
+            "task": {
+                "task_id": task["task_id"],
+                "status": task["status"],
+                "filename": task["filename"],
+                "total_estimate": task["total_estimate"],
+                "processed": task["processed"],
+                "successful": task["successful"],
+                "failed": task["failed"],
+                "retries_429": task["retries_429"],
+                "speed_per_sec": task["speed_per_sec"],
+                "elapsed_seconds": round(elapsed, 1),
+                "errors": task["errors"][:15],
+                "error_message": task.get("error_message", None)
+            }
+        })
+
+@ui.route("/api/import-task/<task_id>/cancel", methods=["POST"])
+@login_required
+def api_cancel_import_task(task_id):
+    """Requests graceful cancellation of a running bulk import task"""
+    with IMPORT_TASKS_LOCK:
+        task = IMPORT_TASKS.get(task_id)
+        if not task:
+            return jsonify({"status": "error", "message": "Task not found"}), 404
+        task["cancel_requested"] = True
+        task["status"] = "cancelled"
+        task["end_time"] = time.time()
+        return jsonify({"status": "success", "message": "Cancellation requested."})
+
+@ui.route("/api/db/<db_id>/container/<container_id>/empty", methods=["POST"])
+@login_required
+def api_empty_container(db_id, container_id):
+    """
+    Empties all documents from a container by recreating it with identical schema/configuration
+    or by bulk-deleting all documents.
+    """
+    store = get_store()
+    client = store["client"]
     try:
         db_client = client.get_database_client(db_id)
         container = db_client.get_container_client(container_id)
         
-        where_clause, params = build_search_query(search_mode, search_query)
-        sql = f"SELECT * FROM c {where_clause}"
+        # Read current container properties (partition key, indexing policy, default_ttl, etc.)
+        properties = container.read()
+        pk_info = properties.get("partitionKey", {})
+        pk_paths = pk_info.get("paths", ["/id"])
+        pk_path = pk_paths[0] if pk_paths else "/id"
+        indexing_policy = properties.get("indexingPolicy")
+        default_ttl = properties.get("defaultTtl")
+        unique_key_policy = properties.get("uniqueKeyPolicy")
         
-        items = list(container.query_items(query=sql, parameters=params, enable_cross_partition_query=True))
-        
-        if not items:
-            flash("No data found to export.", "warning")
-            return redirect(url_for("ui.container_view", db_id=db_id, container_id=container_id))
-
-        # Flatten items to construct standard key-value headers
-        # Gather all unique keys from top-level fields
-        headers = set()
-        for it in items:
-            headers.update(it.keys())
-        # Put 'id' first for clean structure
-        headers = sorted(list(headers))
-        if "id" in headers:
-            headers.remove("id")
-            headers.insert(0, "id")
-
-        if format_type == "xlsx":
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "CosmosExport"
+        # Method 1: Drop & Recreate container (Instant deletion of millions of documents with 0 RU cost per item)
+        try:
+            db_client.delete_container(container_id)
             
-            # Write headers
-            ws.append(headers)
-            
-            # Write rows
-            for it in items:
-                row = []
-                for h in headers:
-                    val = it.get(h, "")
-                    if isinstance(val, (dict, list)):
-                        val = json.dumps(val)
-                    row.append(val)
-                ws.append(row)
+            create_kwargs = {
+                "id": container_id,
+                "partition_key": PartitionKey(path=pk_path)
+            }
+            if indexing_policy:
+                create_kwargs["indexing_policy"] = indexing_policy
+            if default_ttl is not None:
+                create_kwargs["default_ttl"] = default_ttl
+            if unique_key_policy:
+                create_kwargs["unique_key_policy"] = unique_key_policy
                 
-            out = io.BytesIO()
-            wb.save(out)
-            out.seek(0)
-            
-            filename = f"cosmos_{container_id}_{datetime.now().strftime('%Y%m%d%H%S')}.xlsx"
-            return send_file(
-                out,
-                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                as_attachment=True,
-                download_name=filename
-            )
-            
-        else: # CSV default
-            out = io.StringIO()
-            writer = csv.writer(out)
-            
-            # Headers
-            writer.writerow(headers)
-            
-            # Rows
+            db_client.create_container(**create_kwargs)
+            return jsonify({
+                "status": "success",
+                "message": f"Container '{container_id}' was emptied successfully (recreated with original schema)."
+            })
+        except Exception as recreate_err:
+            print(f"Container recreate notice, falling back to document truncate: {recreate_err}")
+            # Method 2: Fallback query and bulk delete
+            items = list(container.query_items("SELECT c.id FROM c", enable_cross_partition_query=True))
+            deleted_count = 0
             for it in items:
-                row = []
-                for h in headers:
-                    val = it.get(h, "")
-                    if isinstance(val, (dict, list)):
-                        val = json.dumps(val)
-                    row.append(val)
-                writer.writerow(row)
-                
-            mem = io.BytesIO()
-            mem.write(out.getvalue().encode("utf-8"))
-            mem.seek(0)
+                pk_val = extract_partition_key_value(it, pk_path)
+                try:
+                    execute_with_429_retry(container.delete_item, item=it["id"], partition_key=pk_val)
+                    deleted_count += 1
+                except Exception:
+                    pass
+            return jsonify({
+                "status": "success",
+                "message": f"Emptied {deleted_count} document(s) from container '{container_id}'."
+            })
             
-            filename = f"cosmos_{container_id}_{datetime.now().strftime('%Y%m%d%H%S')}.csv"
-            return send_file(
-                mem,
-                mimetype="text/csv",
-                as_attachment=True,
-                download_name=filename
-            )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": f"Failed to empty container: {str(e)}"}), 500
+
+@ui.route("/api/db/<db_id>/container/<container_id>/export-async", methods=["POST"])
+@login_required
+def api_async_export_items(db_id, container_id):
+    """Initiates an asynchronous background export task with live progress tracking"""
+    store = get_store()
+    client = store["client"]
+
+    try:
+        data = request.get_json() or {}
+        format_type = data.get("format", "jsonl").lower()
+        if format_type not in ["json", "jsonl", "ndjson", "csv", "xlsx"]:
+            format_type = "jsonl"
+
+        search_mode = data.get("search_mode", "simple")
+        search_query = data.get("search_query", "")
+
+        q_meta = parse_and_build_query(search_mode, search_query, offset=0, limit=10000000)
+        export_sql = q_meta["items_sql"]
+        # Strip pagination offset/limit to export full dataset
+        if "OFFSET" in export_sql.upper():
+            offset_pos = export_sql.upper().rfind("OFFSET")
+            export_sql = export_sql[:offset_pos].strip()
+
+        task_id = str(uuid.uuid4())
+        ext = "xlsx" if format_type == "xlsx" else ("csv" if format_type == "csv" else ("json" if format_type == "json" else "jsonl"))
+        filename = f"cosmos_{container_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
+        temp_file_path = os.path.join(TEMP_EXPORT_DIR, f"{task_id}_{filename}")
+
+        # Total count estimate
+        total_estimate = data.get("total_estimate", 0)
+
+        with EXPORT_TASKS_LOCK:
+            EXPORT_TASKS[task_id] = {
+                "task_id": task_id,
+                "db_id": db_id,
+                "container_id": container_id,
+                "filename": filename,
+                "file_path": temp_file_path,
+                "format": format_type,
+                "status": "starting",
+                "total_estimate": total_estimate,
+                "processed": 0,
+                "retries_429": 0,
+                "speed_per_sec": 0,
+                "start_time": time.time(),
+                "end_time": None,
+                "cancel_requested": False
+            }
+
+        worker_thread = threading.Thread(
+            target=run_export_worker,
+            args=(task_id, temp_file_path, filename, format_type, db_id, container_id, export_sql, q_meta["params"], client),
+            daemon=True
+        )
+        worker_thread.start()
+
+        return jsonify({
+            "status": "success",
+            "task_id": task_id,
+            "message": "Export job initiated successfully.",
+            "filename": filename
+        })
 
     except Exception as e:
         traceback.print_exc()
-        flash(f"Export failed: {str(e)}", "danger")
-        return redirect(url_for("ui.container_view", db_id=db_id, container_id=container_id))
+        return jsonify({"status": "error", "message": f"Failed to start export: {str(e)}"}), 500
+
+
+@ui.route("/api/export-task/<task_id>", methods=["GET"])
+@login_required
+def api_get_export_task(task_id):
+    """Fetch live progress metrics of a background export task"""
+    with EXPORT_TASKS_LOCK:
+        task = EXPORT_TASKS.get(task_id)
+        if not task:
+            return jsonify({"status": "error", "message": "Task not found"}), 404
+
+        elapsed = (task["end_time"] if task.get("end_time") else time.time()) - task["start_time"]
+
+        return jsonify({
+            "status": "success",
+            "task": {
+                "task_id": task["task_id"],
+                "status": task["status"],
+                "filename": task["filename"],
+                "total_estimate": task["total_estimate"],
+                "processed": task["processed"],
+                "retries_429": task["retries_429"],
+                "speed_per_sec": task["speed_per_sec"],
+                "elapsed_seconds": round(elapsed, 1),
+                "error_message": task.get("error_message", None)
+            }
+        })
+
+
+@ui.route("/api/export-task/<task_id>/cancel", methods=["POST"])
+@login_required
+def api_cancel_export_task(task_id):
+    """Requests cancellation of a running export task"""
+    with EXPORT_TASKS_LOCK:
+        task = EXPORT_TASKS.get(task_id)
+        if not task:
+            return jsonify({"status": "error", "message": "Task not found"}), 404
+        task["cancel_requested"] = True
+        task["status"] = "cancelled"
+        task["end_time"] = time.time()
+        return jsonify({"status": "success", "message": "Export cancellation requested."})
+
+
+@ui.route("/api/export-task/<task_id>/download", methods=["GET"])
+@login_required
+def api_download_export_task(task_id):
+    """Download the completed exported file"""
+    with EXPORT_TASKS_LOCK:
+        task = EXPORT_TASKS.get(task_id)
+        if not task or task.get("status") != "completed":
+            flash("Export file not ready or task not found.", "warning")
+            return redirect(url_for("ui.dashboard"))
+
+        file_path = task["file_path"]
+        filename = task["filename"]
+
+    if not os.path.exists(file_path):
+        flash("Export file does not exist on server.", "danger")
+        return redirect(url_for("ui.dashboard"))
+
+    mimetype = "application/octet-stream"
+    if filename.endswith(".json"):
+        mimetype = "application/json"
+    elif filename.endswith(".jsonl") or filename.endswith(".ndjson"):
+        mimetype = "application/x-ndjson"
+    elif filename.endswith(".csv"):
+        mimetype = "text/csv"
+    elif filename.endswith(".xlsx"):
+        mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    return send_file(
+        file_path,
+        mimetype=mimetype,
+        as_attachment=True,
+        download_name=filename
+    )
 
 @ui.route("/db/<db_id>/container/<container_id>/import", methods=["POST"])
 @login_required
 def import_items(db_id, container_id):
-    """Import items from a CSV or Excel file"""
+    """Synchronous import fallback handling JSON, JSONL, CSV, and XLSX with 429 retries"""
     store = get_store()
     client = store["client"]
     
@@ -460,78 +1445,46 @@ def import_items(db_id, container_id):
         return redirect(url_for("ui.container_view", db_id=db_id, container_id=container_id))
 
     try:
+        filename = file.filename
+        temp_path = os.path.join(TEMP_UPLOAD_DIR, f"sync_{uuid.uuid4()}_{filename}")
+        file.save(temp_path)
+        
         db_client = client.get_database_client(db_id)
         container = db_client.get_container_client(container_id)
         pk_path = get_partition_key_path(container)
-        clean_pk = pk_path.strip("/")
+        clean_pk = pk_path.strip("/") if pk_path else "id"
 
         imported_count = 0
         skipped_count = 0
+        total_429_retries = 0
         errors = []
 
-        filename = file.filename.lower()
-        rows = []
-        headers = []
-
-        file_bytes = file.stream.read()
-        file_io = io.BytesIO(file_bytes)
-
-        if filename.endswith(".csv"):
-            stream = io.StringIO(file_bytes.decode("utf-8"), newline=None)
-            reader = csv.reader(stream)
-            headers = next(reader, None)
-            if headers:
-                for r in reader:
-                    rows.append(r)
-        elif filename.endswith(".xlsx"):
-            wb = load_workbook(file_io, read_only=True)
-            ws = wb.active
-            rows_iter = ws.iter_rows(values_only=True)
-            headers = next(rows_iter, None)
-            if headers:
-                for r in rows_iter:
-                    rows.append(r)
-        else:
-            flash("Unsupported file format. Please upload a CSV or XLSX file.", "danger")
-            return redirect(url_for("ui.container_view", db_id=db_id, container_id=container_id))
-
-        if not headers:
-            flash("Uploaded file is empty or missing headers.", "danger")
-            return redirect(url_for("ui.container_view", db_id=db_id, container_id=container_id))
-
-        for idx, row in enumerate(rows):
-            try:
-                # Build dict
-                doc = {}
-                for h_idx, h in enumerate(headers):
-                    if h_idx < len(row) and h is not None:
-                        val = row[h_idx]
-                        # Try to parse stringified JSON lists/dicts
-                        if isinstance(val, str) and (val.startswith("{") or val.startswith("[")):
-                            try:
-                                val = json.loads(val)
-                            except Exception:
-                                pass
-                        doc[h] = val
-
-                # Ensure id exists or generate
-                if "id" not in doc or not str(doc["id"]).strip():
-                    doc["id"] = str(uuid.uuid4())
-
-                # Ensure partition key path property exists
-                pk_val = extract_partition_key_value(doc, pk_path)
-                if pk_val is None:
-                    # Inject a default or raise
-                    doc[clean_pk] = "imported"
-                
-                # Upsert into Cosmos DB
-                container.upsert_item(body=doc)
-                imported_count += 1
-            except Exception as item_err:
-                skipped_count += 1
-                errors.append(f"Row {idx+1}: {str(item_err)}")
+        try:
+            for idx, doc in stream_file_records(temp_path, filename):
+                if "_parse_error" in doc:
+                    skipped_count += 1
+                    errors.append(f"Row {idx}: {doc['_parse_error']}")
+                    continue
+                try:
+                    if "id" not in doc or not str(doc["id"]).strip():
+                        doc["id"] = str(uuid.uuid4())
+                    pk_val = extract_partition_key_value(doc, pk_path)
+                    if pk_val is None:
+                        doc[clean_pk] = "imported"
+                    _, retries = execute_with_429_retry(container.upsert_item, body=doc, max_retries=10)
+                    total_429_retries += retries
+                    imported_count += 1
+                except Exception as item_err:
+                    skipped_count += 1
+                    if len(errors) < 5:
+                        errors.append(f"Row {idx}: {str(item_err)}")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
         msg = f"Import Summary: {imported_count} documents imported successfully."
+        if total_429_retries > 0:
+            msg += f" (Handled {total_429_retries} rate limit 429 retries)"
         if skipped_count > 0:
             msg += f" {skipped_count} items failed. Sample errors: {', '.join(errors[:3])}"
             flash(msg, "warning")

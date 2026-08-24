@@ -23,7 +23,7 @@
             </div>
             <div class="meta-stat">
                 <span class="label">Total Matched</span>
-                <span class="value font-mono">{{ total_items }}</span>
+                <span class="value font-mono" id="totalMatchedDisplay">{{ total_items }}</span>
             </div>
         </div>
     </div>
@@ -34,35 +34,64 @@
         <div class="glass-card search-card flex-grow">
             <form action="{{ url_for('ui.container_view', db_id=db_id, container_id=container_id) }}" method="GET" class="search-form" id="searchForm">
                 <input type="hidden" name="limit" value="{{ limit }}">
-                <input type="hidden" name="page" value="1"> <!-- Reset to page 1 on new search -->
+                <input type="hidden" name="page" value="1">
                 
                 <div class="search-type-selectors">
                     <label class="search-type-radio">
                         <input type="radio" name="search_mode" value="simple" {% if search_mode == 'simple' %}checked{% endif %} onclick="toggleSearchMode('simple')">
-                        <div class="type-button">Simple Search</div>
+                        <div class="type-button"><i class="fa-solid fa-magnifying-glass"></i> Simple ID Search</div>
                     </label>
                     <label class="search-type-radio">
                         <input type="radio" name="search_mode" value="advanced" {% if search_mode == 'advanced' %}checked{% endif %} onclick="toggleSearchMode('advanced')">
-                        <div class="type-button">Advanced SQL WHERE</div>
+                        <div class="type-button"><i class="fa-solid fa-terminal"></i> Cosmos SQL Query</div>
                     </label>
                 </div>
 
-                <div class="search-input-group">
+                <div class="search-input-group" id="searchInputGroup">
                     <div class="search-input-wrapper">
-                        <i class="fa-solid fa-magnifying-glass search-icon-left"></i>
-                        <input type="text" name="search_query" id="search_query" value="{{ search_query }}" 
-                               placeholder="{% if search_mode == 'advanced' %}c.category = 'Electronics' AND c.price > 49.99{% else %}Search by document ID...{% endif %}">
+                        <i class="fa-solid fa-code search-icon-left" id="searchIcon"></i>
+                        {% if search_mode == 'advanced' %}
+                            <textarea name="search_query" id="search_query" rows="2" class="sql-query-textarea"
+                                placeholder="Enter any Cosmos SQL query (e.g. SELECT * FROM c WHERE c.status = 'active' ORDER BY c._ts DESC)">{{ search_query }}</textarea>
+                        {% else %}
+                            <input type="text" name="search_query" id="search_query" value="{{ search_query }}" 
+                                placeholder="Search by document ID...">
+                        {% endif %}
                     </div>
-                    <button type="submit" class="btn btn-primary btn-search">
-                        <i class="fa-solid fa-filter"></i>
-                        <span>Apply</span>
-                    </button>
-                    {% if search_query %}
-                    <a href="{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, limit=limit) }}" class="btn btn-neutral btn-clear" title="Clear Search">
-                        <i class="fa-solid fa-times"></i>
-                    </a>
-                    {% endif %}
+                    <div class="search-actions-group">
+                        <button type="submit" class="btn btn-primary btn-search" id="btnExecuteQuery">
+                            <i class="fa-solid fa-play"></i>
+                            <span>Execute</span>
+                        </button>
+                        {% if search_query %}
+                        <a href="{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, limit=limit) }}" class="btn btn-neutral btn-clear" title="Clear Search & Reset">
+                            <i class="fa-solid fa-times"></i>
+                        </a>
+                        {% endif %}
+                    </div>
                 </div>
+
+                {% if search_mode == 'advanced' %}
+                <div class="sql-hints-bar">
+                    <span class="hint-label"><i class="fa-regular fa-lightbulb"></i> Examples:</span>
+                    <button type="button" class="btn-hint" onclick="setQueryExample('SELECT * FROM c ORDER BY c._ts DESC')">Recent Items</button>
+                    <button type="button" class="btn-hint" onclick="setQueryExample('SELECT * FROM c WHERE c.id != \'\'')">All Documents</button>
+                    <button type="button" class="btn-hint" onclick="setQueryExample('SELECT c.id, c._ts FROM c')">Projections</button>
+                    <button type="button" class="btn-hint" onclick="setQueryExample('SELECT VALUE COUNT(1) FROM c')">Count Aggregation</button>
+                </div>
+                {% endif %}
+
+                {% if query_error %}
+                <div class="query-error-card margin-top-sm">
+                    <div class="query-error-header">
+                        <i class="fa-solid fa-circle-exclamation text-danger"></i>
+                        <span>Cosmos SQL Error</span>
+                    </div>
+                    <div class="query-error-msg font-mono">
+                        {{ query_error }}
+                    </div>
+                </div>
+                {% endif %}
             </form>
         </div>
 
@@ -75,41 +104,51 @@
             
             <div class="portability-actions">
                 <!-- Export Trigger -->
-                <div class="export-group">
-                    <button class="btn btn-neutral dropdown-trigger" onclick="toggleDropdown('exportDropdown')">
-                        <i class="fa-solid fa-file-arrow-down"></i>
-                        <span>Export Data</span>
-                        <i class="fa-solid fa-caret-down"></i>
-                    </button>
-                    <div class="dropdown-menu" id="exportDropdown">
-                        <a href="{{ url_for('ui.export_items', db_id=db_id, container_id=container_id, format='csv', search_mode=search_mode, search_query=search_query) }}">
-                            <i class="fa-solid fa-file-csv"></i> Export to CSV
-                        </a>
-                        <a href="{{ url_for('ui.export_items', db_id=db_id, container_id=container_id, format='xlsx', search_mode=search_mode, search_query=search_query) }}">
-                            <i class="fa-solid fa-file-excel"></i> Export to Excel
-                        </a>
-                    </div>
-                </div>
+                <button class="btn btn-neutral" onclick="openExportModal()" title="Export container data to JSON, JSONL, CSV, or Excel">
+                    <i class="fa-solid fa-file-arrow-down"></i>
+                    <span>Export Data</span>
+                </button>
 
                 <!-- Import Trigger -->
-                <button class="btn btn-neutral" onclick="openImportModal()">
+                <button class="btn btn-primary" onclick="openImportModal()">
                     <i class="fa-solid fa-file-arrow-up"></i>
-                    <span>Import Bulk</span>
+                    <span>Bulk Import</span>
                 </button>
             </div>
         </div>
     </div>
 
-    <!-- Toolbar: Create Document & Delete Container -->
-    <div class="table-toolbar margin-top-md" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-        <button class="btn btn-primary btn-create" onclick="openCreateModal()">
-            <i class="fa-solid fa-plus"></i>
-            <span>Create Document</span>
-        </button>
-        <button class="btn btn-danger" onclick="confirmDeleteContainer('{{ db_id }}', '{{ container_id }}')">
-            <i class="fa-solid fa-trash-can"></i>
-            <span>Delete Container</span>
-        </button>
+    <!-- Toolbar: Create Document, Selection Bar, & Delete Container -->
+    <div class="table-toolbar margin-top-md" style="display: flex; justify-content: space-between; align-items: center; width: 100%; flex-wrap: wrap; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <button class="btn btn-primary btn-create" onclick="openCreateModal()">
+                <i class="fa-solid fa-plus"></i>
+                <span>Create Document</span>
+            </button>
+
+            <!-- Bulk Selection Actions Toolbar (Appears when >= 1 row selected) -->
+            <div id="bulkActionsToolbar" class="bulk-actions-toolbar" style="display: none; align-items: center; gap: 8px;">
+                <span class="badge badge-primary font-mono" id="selectedCountBadge">0 selected</span>
+                <button type="button" class="btn btn-danger btn-sm" onclick="openBulkDeleteModal()">
+                    <i class="fa-solid fa-trash-can"></i>
+                    <span>Delete Selected</span>
+                </button>
+                <button type="button" class="btn btn-neutral btn-sm" onclick="deselectAllDocs()" title="Deselect all items">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 8px;">
+            <button class="btn btn-neutral" style="border-color: rgba(239, 68, 68, 0.4); color: #f87171;" onclick="openEmptyContainerModal()" title="Delete all documents inside this container">
+                <i class="fa-solid fa-broom"></i>
+                <span>Empty Container</span>
+            </button>
+            <button class="btn btn-danger" onclick="confirmDeleteContainer('{{ db_id }}', '{{ container_id }}')">
+                <i class="fa-solid fa-trash-can"></i>
+                <span>Delete Container</span>
+            </button>
+        </div>
     </div>
 
     <!-- Main Documents Table -->
@@ -118,59 +157,103 @@
             <table class="documents-table">
                 <thead>
                     <tr>
-                        <th width="30%">Document ID</th>
-                        <th width="30%">Partition Key Value ({{ pk_path }})</th>
-                        <th width="25%">Content Summary</th>
-                        <th width="15%" class="text-right">Actions</th>
+                        {% if not is_custom_projection %}
+                            <th width="40px" class="text-center">
+                                <input type="checkbox" id="selectAllDocs" class="table-checkbox" onchange="toggleSelectAllDocs(this)" title="Select all on this page">
+                            </th>
+                            <th width="28%">Document ID</th>
+                            <th width="28%">Partition Key Value ({{ pk_path }})</th>
+                            <th width="30%">Content Summary</th>
+                            <th width="14%" class="text-right">Actions</th>
+                        {% else %}
+                            <!-- Dynamic Columns for Custom Projections / Aggregations -->
+                            {% for col in custom_columns %}
+                                <th>{{ col }}</th>
+                            {% endfor %}
+                            <th width="80px" class="text-right">Raw</th>
+                        {% endif %}
                     </tr>
                 </thead>
                 <tbody>
                     {% if items %}
                         {% for item in items %}
-                        <tr>
-                            <td class="font-semibold text-white">
-                                <a href="javascript:void(0)" onclick="openEditModal({{ item.raw|tojson|forceescape }})" class="id-link">
-                                    <i class="fa-regular fa-file-code file-icon"></i>
-                                    <span>{{ item.id }}</span>
-                                </a>
-                            </td>
-                            <td>
-                                <span class="badge badge-neutral font-mono truncate-width max-w-200" title="{{ item.pk_val }}">
-                                    {{ item.pk_val if item.pk_val is not none else 'null' }}
-                                </span>
-                            </td>
-                            <td>
-                                <span class="summary-text truncate-width max-w-250" title="{{ item.raw|tojson }}">
-                                    <!-- Render summary fields -->
-                                    {% set summary = [] %}
-                                    {% for k, v in item.raw.items() %}
-                                        {% if k not in ['id', '_rid', '_self', '_etag', '_attachments', '_ts'] and v is not none %}
-                                            {% if v is string or v is number or v is boolean %}
-                                                {% if summary.append(k ~ ': ' ~ v) %}{% endif %}
+                        <tr id="row-{{ loop.index }}" class="document-row">
+                            {% if not is_custom_projection %}
+                                <!-- Checkbox Selection -->
+                                <td class="text-center">
+                                    <input type="checkbox" class="doc-select-checkbox table-checkbox" 
+                                           data-id="{{ item.id }}" 
+                                           data-pk="{{ item.pk_val|tojson|forceescape if item.pk_val is not none else 'null' }}"
+                                           onchange="updateDocSelection()">
+                                </td>
+                                <td class="font-semibold text-white">
+                                    <a href="javascript:void(0)" onclick="openEditModal({{ item.raw|tojson|forceescape }})" class="id-link">
+                                        <i class="fa-regular fa-file-code file-icon"></i>
+                                        <span>{{ item.id if item.id else '(no id)' }}</span>
+                                    </a>
+                                </td>
+                                <td>
+                                    <span class="badge badge-neutral font-mono truncate-width max-w-200" title="{{ item.pk_val }}">
+                                        {{ item.pk_val if item.pk_val is not none else 'null' }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="summary-text truncate-width max-w-250" title="{{ item.raw|tojson }}">
+                                        {% set summary = [] %}
+                                        {% for k, v in item.raw.items() %}
+                                            {% if k not in ['id', '_rid', '_self', '_etag', '_attachments', '_ts'] and v is not none %}
+                                                {% if v is string or v is number or v is boolean %}
+                                                    {% if summary.append(k ~ ': ' ~ v) %}{% endif %}
+                                                {% endif %}
                                             {% endif %}
-                                        {% endif %}
-                                    {% endfor %}
-                                    {{ summary|join(', ') if summary else '{}' }}
-                                </span>
-                            </td>
-                            <td class="text-right">
-                                <div class="action-buttons-group">
-                                    <button class="btn-action btn-edit" title="Edit JSON" onclick="openEditModal({{ item.raw|tojson|forceescape }})">
-                                        <i class="fa-solid fa-pen-to-square"></i>
+                                        {% endfor %}
+                                        {{ summary|join(', ') if summary else '{}' }}
+                                    </span>
+                                </td>
+                                <td class="text-right">
+                                    <div class="action-buttons-group">
+                                        <button class="btn-action btn-edit" title="Edit JSON" onclick="openEditModal({{ item.raw|tojson|forceescape }})">
+                                            <i class="fa-solid fa-pen-to-square"></i>
+                                        </button>
+                                        <button class="btn-action btn-delete" title="Delete Document" onclick="confirmDelete('{{ item.id }}', {{ item.pk_val|tojson|forceescape if item.pk_val is not none else 'null' }})">
+                                            <i class="fa-regular fa-trash-can"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            {% else %}
+                                <!-- Custom Projection Columns -->
+                                {% for col in custom_columns %}
+                                    <td>
+                                        <span class="font-mono truncate-width max-w-200" title="{{ item.raw.get(col, '') }}">
+                                            {% set cell_val = item.raw.get(col, '') %}
+                                            {% if cell_val is mapping or cell_val is sequence and not cell_val is string %}
+                                                {{ cell_val|tojson }}
+                                            {% else %}
+                                                {{ cell_val }}
+                                            {% endif %}
+                                        </span>
+                                    </td>
+                                {% endfor %}
+                                <td class="text-right">
+                                    <button class="btn-action btn-edit" title="Inspect Raw JSON" onclick="inspectRawJson({{ item.raw|tojson|forceescape }})">
+                                        <i class="fa-solid fa-code"></i>
                                     </button>
-                                    <button class="btn-action btn-delete" title="Delete Document" onclick="confirmDelete('{{ item.id }}', {{ item.pk_val|tojson|forceescape if item.pk_val is not none else 'null' }})">
-                                        <i class="fa-regular fa-trash-can"></i>
-                                    </button>
-                                </div>
-                            </td>
+                                </td>
+                            {% endif %}
                         </tr>
                         {% endfor %}
                     {% else %}
                         <tr>
-                            <td colspan="4" class="table-empty-state">
-                                <i class="fa-solid fa-folder-open empty-icon"></i>
-                                <h4>No Documents Found</h4>
-                                <p>Create a new document, upload data, or adjust your search parameters to view results.</p>
+                            <td colspan="{% if is_custom_projection %}{{ custom_columns|length + 1 }}{% else %}5{% endif %}" class="table-empty-state">
+                                {% if query_error %}
+                                    <i class="fa-solid fa-triangle-exclamation empty-icon text-danger"></i>
+                                    <h4 class="text-danger">Query Execution Failed</h4>
+                                    <p>Please fix the SQL syntax error shown in the error banner above and re-execute.</p>
+                                {% else %}
+                                    <i class="fa-solid fa-folder-open empty-icon"></i>
+                                    <h4>No Documents Found</h4>
+                                    <p>Create a new document, import data, or adjust your search query to view results.</p>
+                                {% endif %}
                             </td>
                         </tr>
                     {% endif %}
@@ -178,8 +261,8 @@
             </table>
         </div>
 
-        <!-- Pagination Bar -->
-        {% if total_pages > 1 or items %}
+        <!-- Pagination Bar with Smart Count Parameter -->
+        {% if can_paginate and (total_pages > 1 or items) %}
         <div class="pagination-bar">
             <div class="page-size-selector">
                 <span>Show:</span>
@@ -188,6 +271,7 @@
                     <option value="10" {% if limit == 10 %}selected{% endif %}>10 rows</option>
                     <option value="25" {% if limit == 25 %}selected{% endif %}>25 rows</option>
                     <option value="50" {% if limit == 50 %}selected{% endif %}>50 rows</option>
+                    <option value="100" {% if limit == 100 %}selected{% endif %}>100 rows</option>
                 </select>
             </div>
 
@@ -196,7 +280,7 @@
             </div>
 
             <div class="pagination-controls">
-                <a href="{% if page > 1 %}{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, page=page-1, limit=limit, search_mode=search_mode, search_query=search_query) }}{% else %}javascript:void(0){% endif %}" 
+                <a href="{% if page > 1 %}{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, page=page-1, limit=limit, search_mode=search_mode, search_query=search_query, total_items=total_items) }}{% else %}javascript:void(0){% endif %}" 
                    class="btn-page {% if page <= 1 %}disabled{% endif %}" title="Previous Page">
                     <i class="fa-solid fa-angle-left"></i>
                 </a>
@@ -204,7 +288,7 @@
                 <div class="page-links">
                     {% for p in range(1, total_pages + 1) %}
                         {% if p == 1 or p == total_pages or (p >= page - 2 and p <= page + 2) %}
-                            <a href="{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, page=p, limit=limit, search_mode=search_mode, search_query=search_query) }}" 
+                            <a href="{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, page=p, limit=limit, search_mode=search_mode, search_query=search_query, total_items=total_items) }}" 
                                class="page-link-btn {% if page == p %}active{% endif %}">
                                 {{ p }}
                             </a>
@@ -214,7 +298,7 @@
                     {% endfor %}
                 </div>
 
-                <a href="{% if page < total_pages %}{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, page=page+1, limit=limit, search_mode=search_mode, search_query=search_query) }}{% else %}javascript:void(0){% endif %}" 
+                <a href="{% if page < total_pages %}{{ url_for('ui.container_view', db_id=db_id, container_id=container_id, page=page+1, limit=limit, search_mode=search_mode, search_query=search_query, total_items=total_items) }}{% else %}javascript:void(0){% endif %}" 
                    class="btn-page {% if page >= total_pages %}disabled{% endif %}" title="Next Page">
                     <i class="fa-solid fa-angle-right"></i>
                 </a>
@@ -268,51 +352,165 @@
     </div>
 </div>
 
-<!-- 2. Import Data Modal -->
+<!-- 2. High-Throughput Bulk Import Modal -->
 <div class="modal" id="importModal">
-    <div class="modal-dialog">
-        <form action="{{ url_for('ui.import_items', db_id=db_id, container_id=container_id) }}" method="POST" enctype="multipart/form-data" class="modal-content">
+    <div class="modal-dialog modal-md">
+        <form id="asyncImportForm" onsubmit="handleAsyncImportSubmit(event)" class="modal-content">
             <div class="modal-header">
                 <div class="modal-title-group">
-                    <i class="fa-solid fa-file-arrow-up title-icon"></i>
-                    <h3>Bulk Import Documents</h3>
+                    <i class="fa-solid fa-file-arrow-up title-icon" style="color: var(--primary);"></i>
+                    <h3>High-Throughput Bulk Import</h3>
                 </div>
                 <button type="button" class="modal-close" onclick="closeModal('importModal')">&times;</button>
             </div>
             
             <div class="modal-body">
-                <p class="description-text">Upload a CSV or Excel (.xlsx) file to import documents directly into <strong>{{ container_id }}</strong> container.</p>
+                <p class="description-text">
+                    Stream and ingest large datasets (up to 4+ lacs records) directly into <strong>{{ container_id }}</strong> container with automatic 429 rate limit backoff.
+                </p>
                 
-                <div class="file-upload-area">
+                <div class="file-upload-area" id="importDropZone">
                     <i class="fa-solid fa-cloud-arrow-up upload-icon"></i>
-                    <label for="importFile" class="file-label">Choose CSV or Excel file</label>
-                    <input type="file" name="file" id="importFile" accept=".csv, .xlsx" required onchange="updateFileNameDisplay(this)">
+                    <label for="importFile" class="file-label">Choose JSON, JSONL, CSV, or Excel file</label>
+                    <input type="file" name="file" id="importFile" accept=".json, .jsonl, .ndjson, .csv, .xlsx" required onchange="updateFileNameDisplay(this)">
                     <div class="file-name-display" id="importFileName">No file chosen</div>
                 </div>
 
+                <div class="input-wrapper margin-top-md">
+                    <label for="importConcurrency" style="font-size: 12px; font-weight: 600; display: block; margin-bottom: 6px;">
+                        Parallel Worker Concurrency (Throughput Tuning)
+                    </label>
+                    <select id="importConcurrency" name="concurrency" class="db-select">
+                        <option value="25">25 Workers (Safe for low RU containers ~500 docs/s)</option>
+                        <option value="50">50 Workers (Fast ~1,200 docs/s)</option>
+                        <option value="100" selected>100 Workers (Turbo ~2,500 - 4,000 docs/s)</option>
+                        <option value="200">200 Workers (Max Cosmos Capacity / High RU Autoscale)</option>
+                    </select>
+                </div>
+
                 <div class="glass-card import-tip margin-top-md">
-                    <h5><i class="fa-solid fa-circle-info"></i> Import formatting tips:</h5>
-                    <ul>
-                        <li><strong>headers:</strong> The first row must be column headers that match document attributes.</li>
-                        <li><strong>id field:</strong> If an <code>id</code> column isn't provided, unique UUIDs will be generated.</li>
-                        <li><strong>partition key:</strong> Ensure a column exists that matches the partition key path: <code>{{ pk_path.strip('/') }}</code>. Empty keys will import as "imported".</li>
-                        <li><strong>nested objects:</strong> Standard values, nested JSON dicts (e.g. <code>{"age": 30}</code>), and arrays are supported.</li>
+                    <h5><i class="fa-solid fa-circle-info"></i> Supported Formats & Speed Tips:</h5>
+                    <ul style="font-size: 12px; line-height: 1.6; margin-top: 6px; padding-left: 18px;">
+                        <li><strong>.jsonl / .ndjson:</strong> Fastest & memory-efficient for 400k+ records. One JSON object per line.</li>
+                        <li><strong>.json:</strong> Standard JSON array of objects <code>[{...}, {...}]</code>.</li>
+                        <li><strong>.csv & .xlsx:</strong> Column headers map to document fields.</li>
+                        <li><strong>HTTP 429 Handling:</strong> Server rate-limits are automatically retried with exponential backoff.</li>
                     </ul>
                 </div>
             </div>
 
             <div class="modal-footer">
                 <button type="button" class="btn btn-neutral" onclick="closeModal('importModal')">Cancel</button>
-                <button type="submit" class="btn btn-primary">
-                    <i class="fa-solid fa-cloud-arrow-up"></i>
-                    <span>Start Import</span>
+                <button type="submit" class="btn btn-primary" id="btnStartImport">
+                    <i class="fa-solid fa-bolt"></i>
+                    <span>Start High-Speed Import</span>
                 </button>
             </div>
         </form>
     </div>
 </div>
 
-<!-- 3. Confirm Delete Dialog -->
+<!-- 3. Live Import Progress Modal -->
+<div class="modal" id="importProgressModal">
+    <div class="modal-dialog modal-md">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <i class="fa-solid fa-spinner fa-spin title-icon" id="importSpinnerIcon" style="color: var(--primary);"></i>
+                    <h3 id="importProgressTitle">Importing Documents...</h3>
+                </div>
+                <button type="button" class="modal-close" onclick="closeImportProgressModal()">&times;</button>
+            </div>
+            
+            <div class="modal-body pad-tb-lg">
+                <!-- Progress bar -->
+                <div class="progress-wrapper">
+                    <div class="progress-info-row">
+                        <span id="importProgressStatusText" style="font-size: 13px; font-weight: 500; color: var(--text-white);">Processing stream...</span>
+                        <span id="importPercentDisplay" class="font-mono font-semibold" style="color: var(--primary);">0%</span>
+                    </div>
+                    <div class="progress-bar-track">
+                        <div id="importProgressBarFill" class="progress-bar-fill" style="width: 0%;"></div>
+                    </div>
+                </div>
+
+                <!-- Live Metrics Grid -->
+                <div class="import-metrics-grid margin-top-md">
+                    <div class="metric-card">
+                        <span class="metric-label">Processed</span>
+                        <span class="metric-value font-mono" id="metricProcessed">0</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Successful</span>
+                        <span class="metric-value font-mono text-success" id="metricSuccess">0</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Speed</span>
+                        <span class="metric-value font-mono text-info" id="metricSpeed">0 docs/s</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">429 Retries</span>
+                        <span class="metric-value font-mono text-warning" id="metricRetries">0</span>
+                    </div>
+                </div>
+
+                <!-- Error Log Preview -->
+                <div id="importErrorPreviewBox" class="margin-top-md" style="display: none;">
+                    <div style="font-size: 12px; font-weight: 600; color: var(--danger); margin-bottom: 4px;">
+                        <i class="fa-solid fa-triangle-exclamation"></i> Error Log Sample:
+                    </div>
+                    <div id="importErrorList" class="font-mono" style="background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 6px; padding: 8px; font-size: 11px; max-height: 100px; overflow-y: auto; color: #ff8a8a;">
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer" style="justify-content: space-between;">
+                <button type="button" class="btn btn-neutral btn-sm" id="btnCancelImport" onclick="cancelActiveImport()">
+                    <i class="fa-solid fa-ban"></i> Cancel Job
+                </button>
+                <button type="button" class="btn btn-primary btn-sm" id="btnCloseProgressModal" onclick="closeImportProgressModal()" style="display: none;">
+                    <i class="fa-solid fa-check"></i> Done & Refresh View
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 4. Bulk Delete Confirmation Dialog -->
+<div class="modal" id="bulkDeleteModal">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title-group text-danger">
+                    <i class="fa-solid fa-trash-can title-icon"></i>
+                    <h3>Bulk Delete Documents</h3>
+                </div>
+                <button class="modal-close" onclick="closeModal('bulkDeleteModal')">&times;</button>
+            </div>
+            
+            <div class="modal-body pad-tb-lg">
+                <p style="font-size: 13px; line-height: 1.5; color: var(--text-normal);">
+                    Are you sure you want to permanently delete <strong id="bulkDeleteCountDisplay" class="text-white">0</strong> selected document(s)?
+                </p>
+                <div class="selected-ids-preview-box margin-top-xs">
+                    <ul id="bulkDeleteIdList" class="font-mono" style="max-height: 120px; overflow-y: auto; font-size: 11.5px; padding-left: 18px; margin: 8px 0; color: var(--text-muted);">
+                    </ul>
+                </div>
+                <p class="subtext margin-top-xs text-warning"><i class="fa-solid fa-triangle-exclamation"></i> This operation cannot be undone.</p>
+            </div>
+
+            <div class="modal-footer">
+                <button class="btn btn-neutral btn-sm" onclick="closeModal('bulkDeleteModal')">Cancel</button>
+                <button class="btn btn-danger btn-sm" id="btnConfirmBulkDelete" onclick="executeBulkDelete()">
+                    <i class="fa-solid fa-trash-can"></i>
+                    <span>Confirm Bulk Delete</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 5. Single Document Confirm Delete Dialog -->
 <div class="modal" id="deleteModal">
     <div class="modal-dialog modal-sm">
         <div class="modal-content">
@@ -330,10 +528,184 @@
             </div>
 
             <div class="modal-footer">
-                <button class="btn btn-neutral" onclick="closeModal('deleteModal')">Cancel</button>
-                <button class="btn btn-danger" id="btnConfirmDelete" onclick="executeDelete()">
+                <button class="btn btn-neutral btn-sm" onclick="closeModal('deleteModal')">Cancel</button>
+                <button class="btn btn-danger btn-sm" id="btnConfirmDelete" onclick="executeDelete()">
                     <i class="fa-regular fa-trash-can"></i>
                     <span>Delete</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 6. Raw JSON Inspector Modal (for Custom Projections) -->
+<div class="modal" id="rawJsonModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <i class="fa-solid fa-code title-icon"></i>
+                    <h3>Result Item JSON</h3>
+                </div>
+                <button class="modal-close" onclick="closeModal('rawJsonModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <pre id="rawJsonDisplay" class="font-mono" style="background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; font-size: 12.5px; max-height: 450px; overflow-y: auto; color: var(--text-white);"></pre>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-neutral" onclick="closeModal('rawJsonModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 7. Empty Container Confirmation Modal -->
+<div class="modal" id="emptyContainerModal">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title-group text-danger">
+                    <i class="fa-solid fa-triangle-exclamation title-icon"></i>
+                    <h3>Empty Container?</h3>
+                </div>
+                <button class="modal-close" onclick="closeModal('emptyContainerModal')">&times;</button>
+            </div>
+            <div class="modal-body pad-tb-lg">
+                <p>Are you sure you want to delete <strong>ALL documents</strong> in container <strong class="text-white">{{ container_id }}</strong>?</p>
+                <div class="glass-card margin-top-sm" style="background: rgba(239, 68, 68, 0.08); border-color: rgba(239, 68, 68, 0.35); padding: 12px; border-radius: 8px;">
+                    <div style="font-size: 12px; color: var(--text-normal); line-height: 1.5;">
+                        <i class="fa-solid fa-circle-exclamation text-danger"></i>
+                        <strong>Irreversible Action:</strong> All items will be permanently erased. Container settings (Partition Key <code>{{ pk_path }}</code>, indexing policies, and throughput) will remain intact.
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-neutral btn-sm" onclick="closeModal('emptyContainerModal')">Cancel</button>
+                <button class="btn btn-danger btn-sm" id="btnConfirmEmptyContainer" onclick="executeEmptyContainer()">
+                    <i class="fa-solid fa-broom"></i>
+                    <span>Yes, Empty Container</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 8. High-Speed Export Options Dialog -->
+<div class="modal" id="exportModal">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <i class="fa-solid fa-file-arrow-down title-icon"></i>
+                    <h3>Export Container Documents</h3>
+                </div>
+                <button class="modal-close" onclick="closeModal('exportModal')">&times;</button>
+            </div>
+            
+            <form id="asyncExportForm" onsubmit="handleAsyncExportSubmit(event)">
+                <div class="modal-body">
+                    <p class="subtext">Export data matching your current query filter or export the full container.</p>
+
+                    <!-- Scope Info -->
+                    <div class="glass-card margin-top-sm" style="padding: 12px; background: rgba(0, 120, 212, 0.08); border-color: rgba(0, 120, 212, 0.3);">
+                        <div style="font-size: 12px; display: flex; justify-content: space-between; align-items: center;">
+                            <span><i class="fa-solid fa-filter"></i> Active Filter:</span>
+                            <span class="font-mono text-white">
+                                {% if search_query %}
+                                    {{ search_query | truncate(40) }}
+                                {% else %}
+                                    All Documents (Full Container)
+                                {% endif %}
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- Format Selection -->
+                    <div class="input-wrapper margin-top-md">
+                        <label for="exportFormatSelect" style="font-size: 12px; font-weight: 600; display: block; margin-bottom: 6px;">
+                            Select Export Format
+                        </label>
+                        <select id="exportFormatSelect" name="format" class="db-select">
+                            <option value="jsonl" selected>JSON Lines (.jsonl / .ndjson) — Fastest for 20L+ records</option>
+                            <option value="json">Standard JSON Array (.json) — Formatted JSON array</option>
+                            <option value="csv">CSV Spreadsheet (.csv) — Compatible with Excel & Python</option>
+                            <option value="xlsx">Excel Workbook (.xlsx) — Spreadsheet (up to 1M rows)</option>
+                        </select>
+                    </div>
+
+                    <div class="glass-card import-tip margin-top-md">
+                        <h5><i class="fa-solid fa-circle-info"></i> High-Throughput Streaming:</h5>
+                        <ul style="font-size: 12px; line-height: 1.6; margin-top: 6px; padding-left: 18px;">
+                            <li><strong>20L+ Scaling:</strong> Documents stream directly to disk without exhausting server RAM.</li>
+                            <li><strong>Automatic 429 Retry:</strong> Rate limits are retried with exponential backoff.</li>
+                            <li><strong>Live Progress:</strong> Shows real-time exported count and download triggers when ready.</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-neutral" onclick="closeModal('exportModal')">Cancel</button>
+                    <button type="submit" id="btnStartExport" class="btn btn-primary">
+                        <i class="fa-solid fa-bolt"></i>
+                        <span>Start High-Speed Export</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 9. Live Export Progress Dashboard Modal -->
+<div class="modal" id="exportProgressModal">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <i class="fa-solid fa-spinner fa-spin title-icon" id="exportSpinnerIcon"></i>
+                    <h3 id="exportProgressTitle">Exporting Documents...</h3>
+                </div>
+            </div>
+            
+            <div class="modal-body pad-tb-md">
+                <div class="progress-wrapper margin-bottom-md">
+                    <div class="progress-info-row">
+                        <span id="exportProgressStatusText" class="font-mono text-muted" style="font-size: 12px;">Streaming records from Cosmos DB...</span>
+                        <span id="exportPercentDisplay" class="font-mono" style="font-size: 13px; font-weight: 700; color: var(--primary);">0%</span>
+                    </div>
+                    <div class="progress-bar-track">
+                        <div class="progress-bar-fill" id="exportProgressBarFill" style="width: 0%;"></div>
+                    </div>
+                </div>
+
+                <!-- Live Metrics Grid -->
+                <div class="import-metrics-grid">
+                    <div class="metric-card">
+                        <span class="metric-label">Exported</span>
+                        <span class="metric-value font-mono text-info" id="metricExported">0</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Throughput</span>
+                        <span class="metric-value font-mono text-success" id="metricExportSpeed">0 docs/s</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">429 Retries</span>
+                        <span class="metric-value font-mono text-warning" id="metricExportRetries">0</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Elapsed</span>
+                        <span class="metric-value font-mono text-white" id="metricExportElapsed">0s</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer" style="justify-content: space-between;">
+                <button type="button" id="btnCancelExport" class="btn btn-neutral btn-sm" onclick="cancelActiveExport()">
+                    <i class="fa-solid fa-ban"></i>
+                    <span>Cancel Export</span>
+                </button>
+                <button type="button" id="btnDownloadExportResult" class="btn btn-primary btn-sm" style="display: none;" onclick="downloadAndCloseExportModal()">
+                    <i class="fa-solid fa-download"></i>
+                    <span>Download File</span>
                 </button>
             </div>
         </div>
@@ -346,7 +718,8 @@
         dbId: "{{ db_id }}",
         containerId: "{{ container_id }}",
         pkPath: "{{ pk_path }}",
-        cleanPk: "{{ pk_path.strip('/') }}"
+        cleanPk: "{{ pk_path.strip('/') }}",
+        totalItems: {{ total_items }}
     };
 </script>
 {% endblock %}

@@ -50,23 +50,49 @@ document.querySelectorAll('.modal').forEach(modal => {
     });
 });
 
-// --- 3. Dynamic Search Input Formatting ---
+// --- 3. Dynamic Search Input Formatting & Query Helpers ---
 function toggleSearchMode(mode) {
-    const input = document.getElementById('search_query');
-    if (!input) return;
+    const wrapper = document.querySelector('#searchInputGroup .search-input-wrapper');
+    if (!wrapper) return;
+    
+    const inputEl = document.getElementById('search_query');
+    const currentVal = inputEl ? inputEl.value : '';
     
     if (mode === 'advanced') {
-        input.placeholder = "c.category = 'Electronics' AND c.price > 49.99";
+        wrapper.innerHTML = `
+            <i class="fa-solid fa-code search-icon-left" id="searchIcon"></i>
+            <textarea name="search_query" id="search_query" rows="2" class="sql-query-textarea"
+                placeholder="Enter any Cosmos SQL query (e.g. SELECT * FROM c WHERE c.status = 'active' ORDER BY c._ts DESC)">${currentVal}</textarea>
+        `;
+        const hints = document.querySelector('.sql-hints-bar');
+        if (hints) hints.style.display = 'flex';
     } else {
-        input.placeholder = "Search by document ID...";
+        wrapper.innerHTML = `
+            <i class="fa-solid fa-magnifying-glass search-icon-left" id="searchIcon"></i>
+            <input type="text" name="search_query" id="search_query" value="${currentVal}" 
+                placeholder="Search by document ID...">
+        `;
+        const hints = document.querySelector('.sql-hints-bar');
+        if (hints) hints.style.display = 'none';
     }
 }
 
-// --- 4. Pagination / Page Limit Selector ---
+function setQueryExample(sql) {
+    const textarea = document.getElementById('search_query');
+    if (textarea) {
+        textarea.value = sql;
+        textarea.focus();
+    }
+}
+
+// --- 4. Pagination / Page Limit Selector (Smart Count Preserved) ---
 function changePageSize(size) {
     const url = new URL(window.location.href);
     url.searchParams.set('limit', size);
     url.searchParams.set('page', '1'); // reset to page 1
+    if (typeof CONFIG !== 'undefined' && CONFIG && CONFIG.totalItems !== undefined) {
+        url.searchParams.set('total_items', CONFIG.totalItems);
+    }
     window.location.href = url.toString();
 }
 
@@ -87,7 +113,6 @@ function updateFileNameDisplay(input) {
 }
 
 function openImportModal() {
-    // Reset file input
     const fileInput = document.getElementById('importFile');
     if (fileInput) fileInput.value = '';
     
@@ -696,4 +721,532 @@ function submitBulkCreate(mode) {
     
     // Submit natively
     bulkForm.submit();
+}
+
+// =========================================================================
+// --- 16. Document Checkbox Multi-Selection & Bulk Deletion Logic ---
+// =========================================================================
+let selectedDocuments = [];
+
+function toggleSelectAllDocs(masterCheckbox) {
+    const checkboxes = document.querySelectorAll('.doc-select-checkbox');
+    checkboxes.forEach(cb => {
+        cb.checked = masterCheckbox.checked;
+        const row = cb.closest('tr');
+        if (row) {
+            if (masterCheckbox.checked) {
+                row.classList.add('selected-row');
+            } else {
+                row.classList.remove('selected-row');
+            }
+        }
+    });
+    updateDocSelection();
+}
+
+function updateDocSelection() {
+    const checkedBoxes = document.querySelectorAll('.doc-select-checkbox:checked');
+    selectedDocuments = [];
+    
+    checkedBoxes.forEach(cb => {
+        const id = cb.getAttribute('data-id');
+        let pk = cb.getAttribute('data-pk');
+        try {
+            pk = JSON.parse(pk);
+        } catch(e) {}
+        if (id) {
+            selectedDocuments.push({ id: id, partition_key: pk });
+        }
+        const row = cb.closest('tr');
+        if (row) row.classList.add('selected-row');
+    });
+
+    document.querySelectorAll('.doc-select-checkbox:not(:checked)').forEach(cb => {
+        const row = cb.closest('tr');
+        if (row) row.classList.remove('selected-row');
+    });
+
+    const allCheckboxes = document.querySelectorAll('.doc-select-checkbox');
+    const masterCheckbox = document.getElementById('selectAllDocs');
+    if (masterCheckbox && allCheckboxes.length > 0) {
+        masterCheckbox.checked = (checkedBoxes.length === allCheckboxes.length);
+        masterCheckbox.indeterminate = (checkedBoxes.length > 0 && checkedBoxes.length < allCheckboxes.length);
+    }
+
+    const toolbar = document.getElementById('bulkActionsToolbar');
+    const badge = document.getElementById('selectedCountBadge');
+    if (toolbar) {
+        if (selectedDocuments.length > 0) {
+            toolbar.style.display = 'inline-flex';
+            if (badge) badge.textContent = `${selectedDocuments.length} selected`;
+        } else {
+            toolbar.style.display = 'none';
+        }
+    }
+}
+
+function deselectAllDocs() {
+    const master = document.getElementById('selectAllDocs');
+    if (master) {
+        master.checked = false;
+        master.indeterminate = false;
+    }
+    document.querySelectorAll('.doc-select-checkbox').forEach(cb => {
+        cb.checked = false;
+        const row = cb.closest('tr');
+        if (row) row.classList.remove('selected-row');
+    });
+    updateDocSelection();
+}
+
+function openBulkDeleteModal() {
+    if (!selectedDocuments || selectedDocuments.length === 0) return;
+    const countDisplay = document.getElementById('bulkDeleteCountDisplay');
+    if (countDisplay) countDisplay.textContent = selectedDocuments.length;
+    
+    const list = document.getElementById('bulkDeleteIdList');
+    if (list) {
+        list.innerHTML = selectedDocuments.slice(0, 15).map(item => `<li>${item.id}</li>`).join('');
+        if (selectedDocuments.length > 15) {
+            list.innerHTML += `<li>...and ${selectedDocuments.length - 15} more</li>`;
+        }
+    }
+    openModal('bulkDeleteModal');
+}
+
+function executeBulkDelete() {
+    if (!selectedDocuments || selectedDocuments.length === 0) return;
+    const btn = document.getElementById('btnConfirmBulkDelete');
+    btn.disabled = true;
+    btn.querySelector('span').textContent = "Deleting selected...";
+
+    const url = `/cosmos-ui/api/db/${CONFIG.dbId}/container/${CONFIG.containerId}/items/bulk-delete`;
+
+    fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: selectedDocuments })
+    })
+    .then(res => res.json())
+    .then(res => {
+        if (res.status === 'success') {
+            closeModal('bulkDeleteModal');
+            alert(res.message);
+            window.location.reload();
+        } else {
+            alert("Bulk Delete Error: " + (res.message || "Failed"));
+            btn.disabled = false;
+            btn.querySelector('span').textContent = "Confirm Bulk Delete";
+        }
+    })
+    .catch(err => {
+        console.error(err);
+        alert("Network error occurred during bulk delete.");
+        btn.disabled = false;
+        btn.querySelector('span').textContent = "Confirm Bulk Delete";
+    });
+}
+
+// =========================================================================
+// --- 17. High-Throughput Bulk Import & Live Progress Tracking ---
+// =========================================================================
+let activeImportTaskId = null;
+let importPollInterval = null;
+
+function handleAsyncImportSubmit(event) {
+    event.preventDefault();
+    const form = document.getElementById('asyncImportForm');
+    const fileInput = document.getElementById('importFile');
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+        alert("Please choose a file to import.");
+        return;
+    }
+
+    const formData = new FormData(form);
+    const btn = document.getElementById('btnStartImport');
+    btn.disabled = true;
+    btn.querySelector('span').textContent = "Initiating...";
+
+    const url = `/cosmos-ui/api/db/${CONFIG.dbId}/container/${CONFIG.containerId}/import-async`;
+
+    fetch(url, {
+        method: 'POST',
+        body: formData
+    })
+    .then(res => res.json())
+    .then(res => {
+        btn.disabled = false;
+        btn.querySelector('span').textContent = "Start High-Speed Import";
+        if (res.status === 'success') {
+            closeModal('importModal');
+            activeImportTaskId = res.task_id;
+            openImportProgressModal(res.total_estimate);
+            startImportProgressPolling();
+        } else {
+            alert("Error starting import: " + (res.message || "Unknown error"));
+        }
+    })
+    .catch(err => {
+        console.error(err);
+        btn.disabled = false;
+        btn.querySelector('span').textContent = "Start High-Speed Import";
+        alert("Network error uploading file: " + err.message);
+    });
+}
+
+function openImportProgressModal(totalEstimate) {
+    document.getElementById('importProgressTitle').textContent = "Importing Documents...";
+    document.getElementById('importProgressStatusText').textContent = "Streaming & ingesting records...";
+    document.getElementById('importPercentDisplay').textContent = "0%";
+    document.getElementById('importProgressBarFill').style.width = "0%";
+    document.getElementById('metricProcessed').textContent = "0";
+    document.getElementById('metricSuccess').textContent = "0";
+    document.getElementById('metricSpeed').textContent = "0 docs/s";
+    document.getElementById('metricRetries').textContent = "0";
+    document.getElementById('importErrorPreviewBox').style.display = "none";
+    document.getElementById('btnCancelImport').style.display = "inline-flex";
+    document.getElementById('btnCloseProgressModal').style.display = "none";
+    document.getElementById('importSpinnerIcon').className = "fa-solid fa-spinner fa-spin title-icon";
+    openModal('importProgressModal');
+}
+
+function startImportProgressPolling() {
+    if (importPollInterval) clearInterval(importPollInterval);
+    importPollInterval = setInterval(pollImportProgress, 600);
+}
+
+function pollImportProgress() {
+    if (!activeImportTaskId) return;
+
+    fetch(`/cosmos-ui/api/import-task/${activeImportTaskId}`)
+    .then(res => res.json())
+    .then(res => {
+        if (res.status === 'success') {
+            const task = res.task;
+            updateImportProgressUI(task);
+        }
+    })
+    .catch(err => console.error("Poll error:", err));
+}
+
+function updateImportProgressUI(task) {
+    const status = task.status;
+    const processed = task.processed || 0;
+    const success = task.successful || 0;
+    const speed = task.speed_per_sec || 0;
+    const retries = task.retries_429 || 0;
+    const errors = task.errors || [];
+    const totalEst = task.total_estimate || 0;
+
+    document.getElementById('metricProcessed').textContent = processed.toLocaleString();
+    document.getElementById('metricSuccess').textContent = success.toLocaleString();
+    document.getElementById('metricSpeed').textContent = `${speed.toLocaleString()} docs/s`;
+    document.getElementById('metricRetries').textContent = retries.toLocaleString();
+
+    // Progress percentage
+    let percent = 0;
+    if (totalEst > 0) {
+        percent = Math.min(100, Math.round((processed / totalEst) * 100));
+    } else if (status === 'completed') {
+        percent = 100;
+    }
+    document.getElementById('importPercentDisplay').textContent = `${percent}%`;
+    document.getElementById('importProgressBarFill').style.width = `${percent}%`;
+
+    // Error preview
+    if (errors.length > 0) {
+        const errBox = document.getElementById('importErrorPreviewBox');
+        const errList = document.getElementById('importErrorList');
+        errBox.style.display = 'block';
+        errList.innerHTML = errors.map(e => `<div>• ${e}</div>`).join('');
+    }
+
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        clearInterval(importPollInterval);
+        importPollInterval = null;
+        document.getElementById('btnCancelImport').style.display = "none";
+        document.getElementById('btnCloseProgressModal').style.display = "inline-flex";
+
+        if (status === 'completed') {
+            document.getElementById('importSpinnerIcon').className = "fa-solid fa-circle-check title-icon text-success";
+            document.getElementById('importProgressTitle').textContent = "Import Completed!";
+            document.getElementById('importProgressStatusText').textContent = `Finished: ${success.toLocaleString()} documents ingested in ${task.elapsed_seconds}s`;
+            document.getElementById('importPercentDisplay').textContent = "100%";
+            document.getElementById('importProgressBarFill').style.width = "100%";
+        } else if (status === 'cancelled') {
+            document.getElementById('importSpinnerIcon').className = "fa-solid fa-circle-stop title-icon text-warning";
+            document.getElementById('importProgressTitle').textContent = "Import Cancelled";
+            document.getElementById('importProgressStatusText').textContent = `Stopped by user after ${processed.toLocaleString()} records.`;
+        } else {
+            document.getElementById('importSpinnerIcon').className = "fa-solid fa-circle-exclamation title-icon text-danger";
+            document.getElementById('importProgressTitle').textContent = "Import Failed";
+            document.getElementById('importProgressStatusText').textContent = task.error_message || "Encountered an error.";
+        }
+    }
+}
+
+function cancelActiveImport() {
+    if (!activeImportTaskId) return;
+    if (!confirm("Are you sure you want to cancel the active bulk import job?")) return;
+
+    const cancelBtn = document.getElementById('btnCancelImport');
+    if (cancelBtn) {
+        cancelBtn.disabled = true;
+        cancelBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Cancelling...';
+    }
+    document.getElementById('importProgressStatusText').textContent = "Cancelling import job...";
+
+    fetch(`/cosmos-ui/api/import-task/${activeImportTaskId}/cancel`, { method: 'POST' })
+    .then(res => res.json())
+    .then(res => {
+        if (importPollInterval) {
+            clearInterval(importPollInterval);
+            importPollInterval = null;
+        }
+        document.getElementById('importSpinnerIcon').className = "fa-solid fa-circle-stop title-icon text-warning";
+        document.getElementById('importProgressTitle').textContent = "Import Cancelled";
+        document.getElementById('importProgressStatusText').textContent = "Stopped by user.";
+        if (cancelBtn) cancelBtn.style.display = "none";
+        document.getElementById('btnCloseProgressModal').style.display = "inline-flex";
+    })
+    .catch(err => {
+        console.error("Cancel error:", err);
+        if (cancelBtn) {
+            cancelBtn.disabled = false;
+            cancelBtn.innerHTML = '<i class="fa-solid fa-ban"></i> Cancel Import';
+        }
+    });
+}
+
+function closeImportProgressModal() {
+    if (importPollInterval) {
+        clearInterval(importPollInterval);
+        importPollInterval = null;
+    }
+    closeModal('importProgressModal');
+    window.location.reload();
+}
+
+// =========================================================================
+// --- 18. Inspect Raw JSON (for Custom Projections) ---
+// =========================================================================
+function inspectRawJson(obj) {
+    const pre = document.getElementById('rawJsonDisplay');
+    if (pre) {
+        pre.textContent = JSON.stringify(obj, null, 2);
+    }
+    openModal('rawJsonModal');
+}
+
+// =========================================================================
+// --- 19. Empty Container (Delete All Documents) Logic ---
+// =========================================================================
+function openEmptyContainerModal() {
+    openModal('emptyContainerModal');
+}
+
+function executeEmptyContainer() {
+    const btn = document.getElementById('btnConfirmEmptyContainer');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Emptying container...</span>';
+
+    const url = `/cosmos-ui/api/db/${CONFIG.dbId}/container/${CONFIG.containerId}/empty`;
+
+    fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+    })
+    .then(res => res.json())
+    .then(res => {
+        if (res.status === 'success') {
+            closeModal('emptyContainerModal');
+            alert(res.message);
+            window.location.reload();
+        } else {
+            alert("Error emptying container: " + (res.message || "Failed"));
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-broom"></i><span>Yes, Empty Container</span>';
+        }
+    })
+    .catch(err => {
+        console.error(err);
+        alert("Network error emptying container.");
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-broom"></i><span>Yes, Empty Container</span>';
+    });
+}
+
+// =========================================================================
+// --- 20. High-Speed Streaming Export & Live Progress Logic ---
+// =========================================================================
+let activeExportTaskId = null;
+let exportPollInterval = null;
+
+function openExportModal() {
+    openModal('exportModal');
+}
+
+function handleAsyncExportSubmit(event) {
+    event.preventDefault();
+    const formatSelect = document.getElementById('exportFormatSelect');
+    const format = formatSelect ? formatSelect.value : 'jsonl';
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const searchMode = urlParams.get('search_mode') || 'simple';
+    const searchQuery = urlParams.get('search_query') || '';
+
+    const btn = document.getElementById('btnStartExport');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Initiating Export...</span>';
+
+    const url = `/cosmos-ui/api/db/${CONFIG.dbId}/container/${CONFIG.containerId}/export-async`;
+
+    fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            format: format,
+            search_mode: searchMode,
+            search_query: searchQuery,
+            total_estimate: (CONFIG && CONFIG.totalItems) ? CONFIG.totalItems : 0
+        })
+    })
+    .then(res => res.json())
+    .then(res => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-bolt"></i><span>Start High-Speed Export</span>';
+        if (res.status === 'success') {
+            closeModal('exportModal');
+            activeExportTaskId = res.task_id;
+            openExportProgressModal((CONFIG && CONFIG.totalItems) ? CONFIG.totalItems : 0);
+            startExportProgressPolling();
+        } else {
+            alert("Error starting export: " + (res.message || "Unknown error"));
+        }
+    })
+    .catch(err => {
+        console.error(err);
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-bolt"></i><span>Start High-Speed Export</span>';
+        alert("Network error starting export: " + err.message);
+    });
+}
+
+function openExportProgressModal(totalEstimate) {
+    document.getElementById('exportProgressTitle').textContent = "Exporting Documents...";
+    document.getElementById('exportProgressStatusText').textContent = "Streaming records from Cosmos DB...";
+    document.getElementById('exportPercentDisplay').textContent = "0%";
+    document.getElementById('exportProgressBarFill').style.width = "0%";
+    document.getElementById('metricExported').textContent = "0";
+    document.getElementById('metricExportSpeed').textContent = "0 docs/s";
+    document.getElementById('metricExportRetries').textContent = "0";
+    document.getElementById('metricExportElapsed').textContent = "0s";
+    document.getElementById('btnCancelExport').style.display = "inline-flex";
+    document.getElementById('btnDownloadExportResult').style.display = "none";
+    document.getElementById('exportSpinnerIcon').className = "fa-solid fa-spinner fa-spin title-icon";
+    openModal('exportProgressModal');
+}
+
+function startExportProgressPolling() {
+    if (exportPollInterval) clearInterval(exportPollInterval);
+    exportPollInterval = setInterval(pollExportProgress, 600);
+}
+
+function pollExportProgress() {
+    if (!activeExportTaskId) return;
+
+    fetch(`/cosmos-ui/api/export-task/${activeExportTaskId}`)
+    .then(res => res.json())
+    .then(res => {
+        if (res.status === 'success') {
+            const task = res.task;
+            updateExportProgressUI(task);
+        }
+    })
+    .catch(err => console.error("Export poll error:", err));
+}
+
+function updateExportProgressUI(task) {
+    const status = task.status;
+    const processed = task.processed || 0;
+    const speed = task.speed_per_sec || 0;
+    const retries = task.retries_429 || 0;
+    const elapsed = task.elapsed_seconds || 0;
+    const totalEst = task.total_estimate || 0;
+
+    document.getElementById('metricExported').textContent = processed.toLocaleString();
+    document.getElementById('metricExportSpeed').textContent = `${speed.toLocaleString()} docs/s`;
+    document.getElementById('metricExportRetries').textContent = retries.toLocaleString();
+    document.getElementById('metricExportElapsed').textContent = `${elapsed}s`;
+
+    let percent = 0;
+    if (totalEst > 0) {
+        percent = Math.min(100, Math.round((processed / totalEst) * 100));
+    } else if (status === 'completed') {
+        percent = 100;
+    }
+    document.getElementById('exportPercentDisplay').textContent = `${percent}%`;
+    document.getElementById('exportProgressBarFill').style.width = `${percent}%`;
+
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        if (exportPollInterval) {
+            clearInterval(exportPollInterval);
+            exportPollInterval = null;
+        }
+        document.getElementById('btnCancelExport').style.display = "none";
+        const downloadBtn = document.getElementById('btnDownloadExportResult');
+
+        if (status === 'completed') {
+            document.getElementById('exportSpinnerIcon').className = "fa-solid fa-circle-check title-icon text-success";
+            document.getElementById('exportProgressTitle').textContent = "Export Ready!";
+            document.getElementById('exportProgressStatusText').textContent = `Successfully streamed ${processed.toLocaleString()} records in ${elapsed}s.`;
+            document.getElementById('exportPercentDisplay').textContent = "100%";
+            document.getElementById('exportProgressBarFill').style.width = "100%";
+            if (downloadBtn) downloadBtn.style.display = "inline-flex";
+
+            // Automatically trigger download
+            window.location.href = `/cosmos-ui/api/export-task/${activeExportTaskId}/download`;
+        } else if (status === 'cancelled') {
+            document.getElementById('exportSpinnerIcon').className = "fa-solid fa-circle-stop title-icon text-warning";
+            document.getElementById('exportProgressTitle').textContent = "Export Cancelled";
+            document.getElementById('exportProgressStatusText').textContent = `Export stopped by user after ${processed.toLocaleString()} records.`;
+        } else {
+            document.getElementById('exportSpinnerIcon').className = "fa-solid fa-circle-exclamation title-icon text-danger";
+            document.getElementById('exportProgressTitle').textContent = "Export Failed";
+            document.getElementById('exportProgressStatusText').textContent = task.error_message || "Encountered an export error.";
+        }
+    }
+}
+
+function cancelActiveExport() {
+    if (!activeExportTaskId) return;
+    if (!confirm("Are you sure you want to cancel the active export job?")) return;
+
+    const cancelBtn = document.getElementById('btnCancelExport');
+    if (cancelBtn) {
+        cancelBtn.disabled = true;
+        cancelBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Cancelling...';
+    }
+    document.getElementById('exportProgressStatusText').textContent = "Cancelling export job...";
+
+    fetch(`/cosmos-ui/api/export-task/${activeExportTaskId}/cancel`, { method: 'POST' })
+    .then(res => res.json())
+    .then(() => {
+        if (exportPollInterval) {
+            clearInterval(exportPollInterval);
+            exportPollInterval = null;
+        }
+        document.getElementById('exportSpinnerIcon').className = "fa-solid fa-circle-stop title-icon text-warning";
+        document.getElementById('exportProgressTitle').textContent = "Export Cancelled";
+        document.getElementById('exportProgressStatusText').textContent = "Stopped by user.";
+        if (cancelBtn) cancelBtn.style.display = "none";
+    })
+    .catch(err => console.error("Export cancel error:", err));
+}
+
+function downloadAndCloseExportModal() {
+    if (activeExportTaskId) {
+        window.location.href = `/cosmos-ui/api/export-task/${activeExportTaskId}/download`;
+    }
+    closeModal('exportProgressModal');
 }

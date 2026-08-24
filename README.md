@@ -40,6 +40,6 @@ The application will be accessible at `http://localhost:8000`.
 ### 3. Deploying to AKS (Azure Kubernetes Service)
 When deploying to AKS within your private VNet:
 1. Push the built image to your internal Azure Container Registry (ACR) or You can pull it from dockerhub `https://hub.docker.com/r/dockercustom/cosmos-ui`
-2. Create a Deployment mapping container port `5001`.
-3. Expose the deployment via an internal LoadBalancer or ClusterIP service and add path /cosmos-ui in Ingress.
+2. Create a Deployment mapping container port `8000`.
+3. Expose the deployment via an internal LoadBalancer or ClusterIP service and add path `/cosmos-ui` in Ingress.
 4. Ensure the AKS cluster's subnets have the necessary VNet peering or Service Endpoints configured to access the Cosmos DB private endpoint.
